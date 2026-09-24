@@ -11,13 +11,19 @@
 //! binary*. A connection that passes gets a fresh random token, valid while
 //! the connection stays open; the window keeps it open for its lifetime.
 //!
+//! The peer's first line names what it is. `window` is Roadie's window.
+//! `terminal` is the CLI answering a request on its own TTY, and is granted
+//! only when the service has no screen to prompt on (`prompt::terminal_allowed`):
+//! with a screen, a program could run the CLI in a pseudo-terminal it
+//! controls and answer for the user, so the dialog or window is the only way.
+//!
 //! Unix: a Unix domain socket in the data dir (`SO_PEERCRED` on Linux,
 //! `LOCAL_PEERPID` on macOS). Windows: a named pipe and
 //! `GetNamedPipeClientProcessId`. No crate; the FFI is hand-declared like
 //! the rest of `process.rs`.
 
 use crate::tools::process;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -26,34 +32,53 @@ pub const HEADER: &str = "x-roadie-owner";
 #[cfg(unix)]
 const SOCKET_NAME: &str = "owner.sock";
 
-fn tokens() -> &'static Mutex<HashSet<String>> {
-    static T: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    T.get_or_init(|| Mutex::new(HashSet::new()))
+/// What connected to the owner channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Peer {
+    Window,
+    Terminal,
+}
+
+impl Peer {
+    fn hello(self) -> &'static str {
+        match self {
+            Peer::Window => "window",
+            Peer::Terminal => "terminal",
+        }
+    }
+}
+
+fn tokens() -> &'static Mutex<HashMap<String, Peer>> {
+    static T: OnceLock<Mutex<HashMap<String, Peer>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Is this a live owner token? Constant-time enough for a 64-hex secret
 /// compared against a handful of entries.
 pub fn is_owner(token: &str) -> bool {
-    tokens().lock().unwrap().iter().any(|t| {
+    tokens().lock().unwrap().keys().any(|t| {
         t.len() == token.len() && t.bytes().zip(token.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
     })
 }
 
+/// How many *windows* hold a token. A terminal answering one request is not
+/// a window: it must not stop the service from prompting, keep it alive, or
+/// trigger the "last window closed" exit.
 pub fn owners_connected() -> usize {
-    tokens().lock().unwrap().len()
+    tokens().lock().unwrap().values().filter(|p| **p == Peer::Window).count()
 }
 
-fn register(token: String) {
-    tokens().lock().unwrap().insert(token);
+fn register(token: String, peer: Peer) {
+    tokens().lock().unwrap().insert(token, peer);
 }
 
 fn unregister(token: &str) {
-    let remaining = {
+    let (was_window, windows_left) = {
         let mut t = tokens().lock().unwrap();
-        t.remove(token);
-        t.len()
+        let removed = t.remove(token);
+        (removed == Some(Peer::Window), t.values().filter(|p| **p == Peer::Window).count())
     };
-    if remaining == 0 {
+    if was_window && windows_left == 0 {
         if let Some(f) = ON_LAST_GONE.get() {
             f();
         }
@@ -72,7 +97,7 @@ pub fn on_last_owner_gone(f: impl Fn() + Send + Sync + 'static) {
 #[cfg(test)]
 pub fn register_for_test() -> String {
     let t = crate::paths::random_hex(32).unwrap();
-    register(t.clone());
+    register(t.clone(), Peer::Window);
     t
 }
 
@@ -105,6 +130,16 @@ pub fn socket_path(data_root: &Path) -> PathBuf {
     }
 }
 
+/// Which peer a hello line names, and whether it may have a token now.
+fn admit(hello: &str, terminal_allowed: bool) -> Result<Peer, &'static str> {
+    match hello.trim() {
+        "window" => Ok(Peer::Window),
+        "terminal" if terminal_allowed => Ok(Peer::Terminal),
+        "terminal" => Err("this computer has a screen, so requests are answered there, not in a terminal"),
+        _ => Err("unknown peer"),
+    }
+}
+
 /// One accepted connection: verify, mint, hand over, hold until EOF.
 fn serve_peer<S: std::io::Read + Write>(mut stream: S, pid: Option<u32>) {
     let Some(pid) = pid else {
@@ -116,12 +151,25 @@ fn serve_peer<S: std::io::Read + Write>(mut stream: S, pid: Option<u32>) {
         let _ = stream.write_all(b"denied: not the Roadie binary\n");
         return;
     }
+    let mut reader = BufReader::new(stream);
+    let mut hello = String::new();
+    if reader.read_line(&mut hello).is_err() {
+        return;
+    }
+    let peer = match admit(&hello, crate::prompt::terminal_allowed()) {
+        Ok(p) => p,
+        Err(why) => {
+            log::info!("owner channel: pid {pid} ({}) refused: {why}", hello.trim());
+            let _ = reader.get_mut().write_all(format!("denied: {why}\n").as_bytes());
+            return;
+        }
+    };
     let Ok(token) = crate::paths::random_hex(32) else { return };
-    register(token.clone());
-    log::info!("owner channel: window pid {pid} connected");
-    if stream.write_all(format!("{token}\n").as_bytes()).is_ok() {
-        // Hold the token for as long as the window keeps the socket open.
-        let mut reader = BufReader::new(stream);
+    register(token.clone(), peer);
+    let what = peer.hello();
+    log::info!("owner channel: {what} pid {pid} connected");
+    if reader.get_mut().write_all(format!("{token}\n").as_bytes()).is_ok() {
+        // Hold the token for as long as the peer keeps the socket open.
         let mut line = String::new();
         while let Ok(n) = reader.read_line(&mut line) {
             if n == 0 {
@@ -131,7 +179,7 @@ fn serve_peer<S: std::io::Read + Write>(mut stream: S, pid: Option<u32>) {
         }
     }
     unregister(&token);
-    log::info!("owner channel: window pid {pid} disconnected");
+    log::info!("owner channel: {what} pid {pid} disconnected");
 }
 
 /// Start accepting owner connections on a background thread.
@@ -196,6 +244,12 @@ pub fn serve(data_root: &Path) -> Result<(), String> {
 /// Client side (the window): connect, read the token, keep the connection
 /// alive for the life of the process.
 pub fn connect(data_root: &Path) -> Result<String, String> {
+    connect_as(data_root, Peer::Window)
+}
+
+/// Client side, as `peer`. A terminal is refused while the service can
+/// prompt on a screen; the error then carries the service's reason.
+pub fn connect_as(data_root: &Path, peer: Peer) -> Result<String, String> {
     let path = socket_path(data_root);
     #[cfg(unix)]
     let stream = std::os::unix::net::UnixStream::connect(&path).map_err(|e| format!("owner channel {}: {e}", path.display()))?;
@@ -215,12 +269,14 @@ pub fn connect(data_root: &Path) -> Result<String, String> {
             }
         }
     };
+    let mut stream = stream;
+    stream.write_all(format!("{}\n", peer.hello()).as_bytes()).map_err(|e| format!("owner channel write: {e}"))?;
     let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
     let mut line = String::new();
     reader.read_line(&mut line).map_err(|e| format!("owner channel read: {e}"))?;
     let line = line.trim().to_string();
     if line.len() != 64 || !line.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!("owner channel refused: {line}"));
+        return Err(line.strip_prefix("denied: ").map(str::to_string).unwrap_or_else(|| format!("owner channel refused: {line}")));
     }
     HELD.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap().push(Box::new(stream));
     Ok(line)
@@ -383,5 +439,20 @@ mod tests {
         #[cfg(windows)]
         assert!(!peer_is_roadie(4), "the System process is not Roadie");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_terminal_is_admitted_only_without_a_screen_and_is_not_a_window() {
+        assert_eq!(admit("window\n", false), Ok(Peer::Window));
+        assert_eq!(admit("terminal\n", true), Ok(Peer::Terminal));
+        assert!(admit("terminal\n", false).unwrap_err().contains("screen"));
+        assert!(admit("", true).is_err(), "a peer must say what it is");
+        let before = owners_connected();
+        let t = crate::paths::random_hex(32).unwrap();
+        register(t.clone(), Peer::Terminal);
+        assert!(is_owner(&t), "a terminal token opens owner routes");
+        assert_eq!(owners_connected(), before, "but does not count as a window");
+        unregister(&t);
+        assert!(!is_owner(&t));
     }
 }

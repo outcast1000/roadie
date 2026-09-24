@@ -82,6 +82,14 @@ pub fn connect_with(data_root: &Path, owner: bool) -> Result<Connection, String>
     Ok(conn)
 }
 
+/// Hold an owner token obtained after connecting (the CLI answering a
+/// request on a terminal, `owner::connect_as(_, Peer::Terminal)`).
+pub fn set_owner_token(token: String) {
+    if let Some(c) = slot().write().unwrap().as_mut() {
+        c.owner_token = Some(token);
+    }
+}
+
 fn http() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder().user_agent("Roadie window").timeout(Duration::from_secs(30 * 60)).build().map_err(|e| e.to_string())
 }

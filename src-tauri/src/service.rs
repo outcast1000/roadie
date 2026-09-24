@@ -41,6 +41,22 @@ fn idle_for() -> Duration {
     Duration::from_secs(paths::now_secs().saturating_sub(LAST_ACTIVITY.load(Ordering::Relaxed)))
 }
 
+/// A request needs the user: show it on this machine's approval surface
+/// (`prompt.rs`). The window build opens its window; the build without one
+/// shows a native dialog; with no screen at all the request waits for
+/// `roadie request <id> answer` in a terminal.
+pub fn ask_user() {
+    match crate::prompt::surface() {
+        crate::prompt::Surface::Window => open_window_if_needed(),
+        crate::prompt::Surface::Dialog => crate::prompt::ask_pending(),
+        crate::prompt::Surface::Terminal => {
+            for r in requests::pending() {
+                log::info!("request {} waits for an answer; no screen here, so run `roadie request {} answer` in a terminal", r.id, r.id);
+            }
+        }
+    }
+}
+
 /// A request or a deep link needs the user and no window is connected:
 /// open one. Debounced so a burst of requests spawns one window.
 pub fn open_window_if_needed() {

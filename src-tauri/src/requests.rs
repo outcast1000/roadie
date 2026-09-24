@@ -7,12 +7,13 @@
 //! restart, which is the right default for "someone asked to install X".
 
 use crate::events;
+use crate::recipe::store::Change;
 use crate::recipe::{FieldKind, Recipe};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::{Mutex, OnceLock};
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum RequestKind {
     /// `config` holds the caller's non-secret decisions (echoed to the
@@ -30,8 +31,19 @@ pub enum RequestKind {
         secrets: Map<String, Value>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         secret_keys: Vec<String>,
+        /// The recipe the client brought, when it differs from the trusted
+        /// one (`recipe_change` says how). Approving trusts it first; the
+        /// prompt shows it for review.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recipe: Option<Box<Recipe>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recipe_change: Option<Change>,
     },
     Uninstall { tool: String, keep_data: bool },
+    /// An installed tool's client brought a different recipe (a newer
+    /// revision, say). Approving trusts it, re-renders the tool's files and
+    /// updates the tool; a busy daemon is not restarted (staged as usual).
+    ReplaceRecipe { tool: String, recipe: Box<Recipe>, recipe_change: Change },
     /// A consumer wants this tool's connection details.
     Connect {
         consumer: String,
@@ -76,8 +88,9 @@ pub struct Request {
 
 /// Build an install request, routing password fields out of the public
 /// `config` so a request can be listed without leaking them. The values
-/// must already have passed `state::validate_patch`.
-pub fn install_kind(recipe: &Recipe, values: Map<String, Value>, consumer: Option<String>) -> RequestKind {
+/// must already have passed `state::validate_patch`. `proposed` is set when
+/// `recipe` is one the client brought and it is not the trusted one.
+pub fn install_kind(recipe: &Recipe, values: Map<String, Value>, consumer: Option<String>, proposed: Option<Change>) -> RequestKind {
     let mut config = Map::new();
     let mut secrets = Map::new();
     for (k, v) in values {
@@ -91,7 +104,23 @@ pub fn install_kind(recipe: &Recipe, values: Map<String, Value>, consumer: Optio
         }
     }
     let secret_keys = secrets.keys().cloned().collect();
-    RequestKind::Install { tool: recipe.name.clone(), consumer, config, secrets, secret_keys }
+    RequestKind::Install {
+        tool: recipe.name.clone(),
+        consumer,
+        config,
+        secrets,
+        secret_keys,
+        recipe: proposed.map(|_| Box::new(recipe.clone())),
+        recipe_change: proposed,
+    }
+}
+
+impl RequestKind {
+    pub fn tool(&self) -> &str {
+        match self {
+            RequestKind::Install { tool, .. } | RequestKind::Uninstall { tool, .. } | RequestKind::Connect { tool, .. } | RequestKind::ReplaceRecipe { tool, .. } => tool,
+        }
+    }
 }
 
 fn store() -> &'static Mutex<Vec<Request>> {
@@ -185,7 +214,7 @@ mod tests {
 
     #[test]
     fn identical_pending_requests_collapse_and_status_moves() {
-        let install = || RequestKind::Install { tool: "t-collapse".into(), consumer: None, config: Map::new(), secrets: Map::new(), secret_keys: vec![] };
+        let install = || RequestKind::Install { tool: "t-collapse".into(), consumer: None, config: Map::new(), secrets: Map::new(), secret_keys: vec![], recipe: None, recipe_change: None };
         let a = create(install(), "test");
         let b = create(install(), "test");
         assert_eq!(a.id, b.id);
@@ -206,7 +235,7 @@ mod tests {
         let mut values = Map::new();
         values.insert("soulseekUsername".into(), Value::String("bj".into()));
         values.insert("soulseekPassword".into(), Value::String("hunter2".into()));
-        let kind = install_kind(&recipe, values, Some("viboplr".into()));
+        let kind = install_kind(&recipe, values, Some("viboplr".into()), None);
         let RequestKind::Install { config, secrets, secret_keys, .. } = &kind else { panic!() };
         assert_eq!(config["soulseekUsername"], "bj");
         assert_eq!(secrets["soulseekPassword"], "hunter2");

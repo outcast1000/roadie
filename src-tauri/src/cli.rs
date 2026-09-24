@@ -14,15 +14,32 @@
 //!
 //! ```text
 //! roadie tool list
-//! roadie tool status slskd
+//! roadie tool status|check slskd
 //! roadie tool start|stop|restart slskd
 //! roadie tool install slskd [--set soulseekUsername=bj] [--set startNow=false] [--consumer <id>] [--wait]
+//! roadie tool upgrade slskd [--wait]
 //! roadie tool uninstall slskd [--keep-data] [--wait]
+//! roadie recipe validate ./slskd.json
+//! roadie recipe dryrun ./slskd.json
+//! roadie request list
 //! roadie request <id> [--wait]
+//! roadie request <id> answer
 //! roadie service status|stop
 //! ```
+//!
+//! Answering: the service shows a request where it can (`prompt.rs`): the
+//! window, or a native dialog in the build without one. Only when the
+//! machine has no screen does `request <id> answer` (and `install --wait`
+//! on a TTY) prompt in the terminal; there is deliberately no `--yes`.
+//!
+//! A tool argument is a recipe name or the path of a recipe file the
+//! calling app ships (`Target`). With a file, `install` and `upgrade` send
+//! the recipe along: the same as the trusted one changes nothing, a new or
+//! changed one rides in the request for the user to review and trust. The
+//! other commands act on the stored recipe and report `recipeDiffers`.
 
-use crate::{api, client, service};
+use crate::{api, client, owner, service};
+use std::io::{BufRead, IsTerminal, Write};
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -38,12 +55,19 @@ pub enum Mode {
 
 pub const USAGE: &str = "usage:
   roadie tool list
-  roadie tool status <name>
-  roadie tool start|stop|restart <name>
-  roadie tool install <name> [--set key=value]... [--consumer <id>] [--wait]
+  roadie tool status|check <tool>          (check: look for a newer release)
+  roadie tool start|stop|restart <tool>
+  roadie tool install <tool> [--set key=value]... [--consumer <id>] [--wait]
                               (--consumer: one approval installs and grants that app its key)
-  roadie tool uninstall <name> [--keep-data] [--wait]
+  roadie tool upgrade <tool> [--wait]      (alias: update)
+  roadie tool uninstall <tool> [--keep-data] [--wait]
+  roadie recipe validate <file>           (offline; errors name a JSON pointer)
+  roadie recipe dryrun <tool>             (resolve and render; downloads and writes nothing)
+  <tool> is a recipe name or the path of a recipe file (.json) your app ships. install and
+  upgrade send the file along: a new or changed recipe is shown to the user to review and trust.
+  roadie request list
   roadie request <id> [--wait]
+  roadie request <id> answer    (show it again; prompts here only on a machine without a screen)
   roadie service status|stop
   roadie --serve
 options: --data-dir <dir>   (default: Roadie's app data dir)
@@ -125,7 +149,7 @@ pub fn parse(args: &[String]) -> Option<Mode> {
         Some(Mode::Serve { data_dir: dir })
     } else if start_tool {
         Some(Mode::LegacyStartTool { data_dir: dir })
-    } else if matches!(command, Some("tool" | "request" | "service" | "help" | "--help" | "-h")) {
+    } else if matches!(command, Some("tool" | "request" | "service" | "recipe" | "help" | "--help" | "-h")) {
         Some(Mode::Client { data_dir: dir, argv: rest })
     } else {
         None
@@ -154,6 +178,57 @@ pub fn parse_sets(argv: &[String]) -> Result<Map<String, Value>, String> {
         }
     }
     Ok(out)
+}
+
+/// What a tool argument names: a recipe by name, or a recipe file the
+/// calling app holds (anything ending in `.json` or containing a path
+/// separator). The file's `/name` names the tool.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Target {
+    pub name: String,
+    pub recipe: Option<Value>,
+    pub file: Option<String>,
+}
+
+pub fn target(arg: &str) -> Result<Target, String> {
+    let is_file = arg.ends_with(".json") || arg.contains('/') || arg.contains('\\');
+    if !is_file {
+        return Ok(Target { name: arg.to_string(), recipe: None, file: None });
+    }
+    let text = std::fs::read_to_string(arg).map_err(|e| format!("read recipe {arg}: {e}"))?;
+    let v: Value = serde_json::from_str(&text).map_err(|e| format!("recipe {arg} is not JSON: {e}"))?;
+    // A draft's `{submittedBy, recipe}` envelope is accepted too.
+    let v = match v.get("recipe") {
+        Some(inner) if inner.is_object() => inner.clone(),
+        _ => v,
+    };
+    let name = v.get("name").and_then(|n| n.as_str()).filter(|n| !n.is_empty()).ok_or_else(|| format!("recipe {arg} has no /name"))?.to_string();
+    Ok(Target { name, recipe: Some(v), file: Some(arg.to_string()) })
+}
+
+/// With a recipe file, say whether Roadie's trusted recipe is that file:
+/// `Some(false)` differs (or is only a draft), `None` without a file.
+fn recipe_matches(t: &Target, call: Call) -> Result<Option<bool>, String> {
+    let (Some(v), Some(file)) = (&t.recipe, &t.file) else { return Ok(None) };
+    let stored = call("GET", &format!("/v1/recipes/{}", enc(&t.name)), None)
+        .map_err(|_| format!("Roadie has no recipe named {} yet; install it with `roadie tool install {file}`", t.name))?;
+    let trusted = stored.get("origin").and_then(|o| o.as_str()) != Some("draft");
+    let same = match (crate::recipe::from_value(v.clone()), stored.get("recipe").cloned().map(crate::recipe::from_value)) {
+        (Ok(a), Some(Ok(b))) => crate::recipe::store::same(&a, &b),
+        _ => false,
+    };
+    if !(same && trusted) {
+        eprintln!("roadie: {file} differs from the recipe Roadie trusts for {}; `roadie tool upgrade {file}` proposes it to the user", t.name);
+    }
+    Ok(Some(same && trusted))
+}
+
+/// Add `recipeDiffers` to an object result when a file was given.
+fn annotate(mut out: Value, matches: Option<bool>) -> Value {
+    if let (Some(m), Some(o)) = (matches, out.as_object_mut()) {
+        o.insert("recipeDiffers".into(), Value::Bool(!m));
+    }
+    out
 }
 
 fn has(argv: &[String], flag: &str) -> bool {
@@ -193,6 +268,16 @@ pub fn run_client(root: &std::path::Path, argv_in: &[String]) -> Result<(i32, Va
             None => (0, json!({ "running": false, "loginItem": crate::tools::autostart::service_enabled(root) })),
         });
     }
+    // Validating a recipe file needs no service: it is the same validator.
+    if cmd == "recipe" && argv.get(1).map(String::as_str) == Some("validate") {
+        let file = argv.get(2).ok_or_else(|| format!("recipe validate needs a file\n{USAGE}"))?;
+        let t = target(file)?;
+        let v = t.recipe.ok_or_else(|| format!("{file} is not a recipe file (.json)"))?;
+        return Ok(match crate::recipe::from_value(v) {
+            Ok(r) => (0, json!({ "ok": true, "name": r.name, "supported": r.supported_on(&crate::recipe::Platform::current()), "errors": [] })),
+            Err(errors) => (1, json!({ "ok": false, "errors": errors })),
+        });
+    }
     if cmd == "service" && argv.get(1).map(String::as_str) == Some("stop") {
         return Ok(match api::probe(root) {
             Some(_) => {
@@ -208,25 +293,53 @@ pub fn run_client(root: &std::path::Path, argv_in: &[String]) -> Result<(i32, Va
     let call = |m: &str, p: &str, b: Option<Value>| client::call(m, p, b, false);
     let wait = has(argv, "--wait");
 
-    match (cmd, argv.get(1).map(String::as_str), argv.get(2).map(String::as_str)) {
+    let tool_arg = argv.get(2).map(|a| target(a)).transpose()?;
+    match (cmd, argv.get(1).map(String::as_str), tool_arg) {
         ("tool", Some("list"), _) => Ok((0, call("GET", "/v1/tools", None)?)),
-        ("tool", Some("status"), Some(name)) => Ok((0, call("GET", &format!("/v1/tools/{}", enc(name)), None)?)),
-        ("tool", Some(action @ ("start" | "stop" | "restart")), Some(name)) => {
-            match call("POST", &format!("/v1/tools/{}/{action}", enc(name)), None) {
+        ("tool", Some("status"), Some(t)) => {
+            let m = recipe_matches(&t, &call)?;
+            Ok((0, annotate(call("GET", &format!("/v1/tools/{}", enc(&t.name)), None)?, m)))
+        }
+        ("tool", Some(action @ ("start" | "stop" | "restart" | "check")), Some(t)) => {
+            let m = recipe_matches(&t, &call)?;
+            let route = if action == "check" { "check-updates" } else { action };
+            match call("POST", &format!("/v1/tools/{}/{route}", enc(&t.name)), None) {
+                Ok(v) => Ok((0, annotate(v, m))),
+                Err(e) => Ok((1, json!({ "error": e }))),
+            }
+        }
+        ("tool", Some("install"), Some(t)) => {
+            let config = parse_sets(argv)?;
+            let mut body = json!({ "config": config, "consumer": value_of(argv, "--consumer") });
+            if let Some(r) = &t.recipe {
+                body["recipe"] = r.clone();
+            }
+            let created = call("POST", &format!("/v1/tools/{}/install", enc(&t.name)), Some(body))?;
+            wait_or_answer(root, created, wait, &call)
+        }
+        ("tool", Some("upgrade" | "update"), Some(t)) => {
+            let body = t.recipe.as_ref().map(|r| json!({ "recipe": r }));
+            match call("POST", &format!("/v1/tools/{}/update", enc(&t.name)), body) {
+                // A changed recipe: the user reviews it, approving updates.
+                Ok(v) if v.get("requestId").is_some() => wait_or_answer(root, v, wait, &call),
                 Ok(v) => Ok((0, v)),
                 Err(e) => Ok((1, json!({ "error": e }))),
             }
         }
-        ("tool", Some("install"), Some(name)) => {
-            let config = parse_sets(argv)?;
-            let created = call("POST", &format!("/v1/tools/{}/install", enc(name)), Some(json!({ "config": config, "consumer": value_of(argv, "--consumer") })))?;
-            finish_request(created, wait, &call)
-        }
-        ("tool", Some("uninstall"), Some(name)) => {
+        ("tool", Some("uninstall"), Some(t)) => {
             let keep = has(argv, "--keep-data");
-            let created = call("DELETE", &format!("/v1/tools/{}?keepData={keep}", enc(name)), None)?;
-            finish_request(created, wait, &call)
+            let created = call("DELETE", &format!("/v1/tools/{}?keepData={keep}", enc(&t.name)), None)?;
+            wait_or_answer(root, created, wait, &call)
         }
+        ("recipe", Some("dryrun"), Some(t)) => {
+            let body = t.recipe.as_ref().map(|r| json!({ "recipe": r }));
+            match call("POST", &format!("/v1/recipes/{}/dryrun", enc(&t.name)), body) {
+                Ok(v) => Ok((0, v)),
+                Err(e) => Ok((1, json!({ "error": e }))),
+            }
+        }
+        ("request", Some("list"), _) => Ok((0, call("GET", "/v1/requests", None)?)),
+        ("request", Some(id), Some(Target { name, .. })) if name == "answer" => answer(root, id, true, &call),
         ("request", Some(id), _) => {
             let r = call("GET", &format!("/v1/requests/{}", enc(id)), None)?;
             if !wait {
@@ -238,20 +351,104 @@ pub fn run_client(root: &std::path::Path, argv_in: &[String]) -> Result<(i32, Va
     }
 }
 
+type Call<'a> = &'a dyn Fn(&str, &str, Option<Value>) -> Result<Value, String>;
+
+/// Stdin and stderr are both a terminal: a person may be typing.
+fn interactive() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// After `install`/`uninstall --wait`: on a terminal, try to answer here
+/// (granted only on a machine without a screen); otherwise wait for the
+/// answer on the screen.
+fn wait_or_answer(root: &std::path::Path, created: Value, wait: bool, call: Call) -> Result<(i32, Value), String> {
+    match created.get("requestId").and_then(|i| i.as_str()) {
+        Some(id) if wait && interactive() => answer(root, id, false, call),
+        _ => finish_request(created, wait, call),
+    }
+}
+
+/// `roadie request <id> answer`. With a screen, the owner channel refuses a
+/// terminal: show the request there again (`reshow`) and wait. Without one,
+/// print the prompt, read y/N, and decide over the owner channel.
+fn answer(root: &std::path::Path, id: &str, reshow: bool, call: Call) -> Result<(i32, Value), String> {
+    let described = call("GET", &format!("/v1/requests/{}/prompt", enc(id)), None)?;
+    if described.get("status").and_then(|s| s.as_str()) != Some("pending") {
+        return finish_request(json!({ "requestId": id }), true, call);
+    }
+    let surface = described.get("surface").and_then(|s| s.as_str()).unwrap_or("");
+    if surface != "terminal" {
+        if reshow {
+            call("POST", &format!("/v1/requests/{}/prompt", enc(id)), None)?;
+        }
+        eprintln!("roadie: this computer has a screen, so Roadie asks there: answer the {surface} it shows (request {id}).");
+        return finish_request(json!({ "requestId": id }), true, call);
+    }
+    if !interactive() {
+        return Err(format!("request {id} can only be answered by a person at a terminal; run `roadie request {id} answer` yourself (there is no --yes)"));
+    }
+    let token = owner::connect_as(root, owner::Peer::Terminal)?;
+    client::set_owner_token(token);
+    let p = described.get("prompt").cloned().unwrap_or(Value::Null);
+    let s = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let lines: Vec<String> = p.get("lines").and_then(|l| l.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    eprintln!("\n{}\n", s("headline"));
+    for l in &lines {
+        eprintln!("  {l}");
+    }
+    let can_approve = p.get("approve").is_some_and(|a| a.is_string());
+    let question = if can_approve {
+        s("question")
+    } else {
+        eprintln!("\n  {}", s("blocked"));
+        "Decline it?".to_string()
+    };
+    eprint!("\n{question} [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line).map_err(|e| format!("read the answer: {e}"))?;
+    if read == 0 {
+        eprintln!();
+        return Ok((3, json!({ "requestId": id, "status": "pending", "note": "no answer (end of input); the request is still pending" })));
+    }
+    let yes = matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    if !can_approve && !yes {
+        return Ok((1, json!({ "requestId": id, "status": "pending", "note": "left pending; it cannot be approved from here" })));
+    }
+    let approve = yes && can_approve;
+    // The decision runs the install inside the call; poll alongside it so
+    // progress shows up here.
+    let id_owned = id.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(client::call("POST", &format!("/v1/owner/requests/{}/decide", enc(&id_owned)), Some(json!({ "approve": approve })), true));
+    });
+    poll_request(id, call, Some(&rx))
+}
+
 /// A 202 came back. Without `--wait`, print it. With `--wait`, poll the
 /// request until the user has decided and the action finished, mirroring
 /// progress to stderr, and map the outcome to an exit code.
-fn finish_request(created: Value, wait: bool, call: &dyn Fn(&str, &str, Option<Value>) -> Result<Value, String>) -> Result<(i32, Value), String> {
+fn finish_request(created: Value, wait: bool, call: Call) -> Result<(i32, Value), String> {
     let Some(id) = created.get("requestId").and_then(|i| i.as_str()).map(str::to_string) else {
         return Ok((0, created));
     };
     if !wait {
         return Ok((0, created));
     }
-    eprintln!("roadie: waiting for the user to answer in Roadie's window (request {id})…");
+    eprintln!("roadie: waiting for the user to answer (request {id}; `roadie request {id} answer` shows it again)…");
+    poll_request(&id, call, None)
+}
+
+/// Poll until the request is done, failed or declined. `decision` is the
+/// terminal's own decide call: if it fails before the request moves, stop.
+fn poll_request(id: &str, call: Call, decision: Option<&std::sync::mpsc::Receiver<Result<Value, String>>>) -> Result<(i32, Value), String> {
     let mut last_line = String::new();
     loop {
-        let r = call("GET", &format!("/v1/requests/{}", enc(&id)), None)?;
+        if let Some(Ok(Err(e))) = decision.map(|rx| rx.try_recv()) {
+            return Ok((1, json!({ "requestId": id, "error": e })));
+        }
+        let r = call("GET", &format!("/v1/requests/{}", enc(id)), None)?;
         let status = r.get("status").and_then(|s| s.as_str()).unwrap_or("");
         if let Some(p) = r.get("progress").filter(|p| !p.is_null()) {
             let line = match (p.get("phase").and_then(|s| s.as_str()), p.get("downloaded").and_then(|d| d.as_u64()), p.get("total").and_then(|t| t.as_u64())) {
@@ -295,6 +492,33 @@ mod tests {
         assert_eq!(parse(&unrelated), None);
         assert_eq!(maybe_run(&unrelated), None);
         assert_eq!(parse(&["roadie".into()]), None, "no arguments is the window");
+    }
+
+    #[test]
+    fn a_tool_argument_is_a_name_or_a_recipe_file_and_validate_needs_no_service() {
+        assert_eq!(target("slskd").unwrap(), Target { name: "slskd".into(), recipe: None, file: None });
+        let dir = std::env::temp_dir().join(format!("roadie-cli-target-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("ffmpeg.json");
+        std::fs::write(&good, crate::recipe::BUILTIN.iter().find(|(n, _)| *n == "ffmpeg").unwrap().1).unwrap();
+        let t = target(good.to_str().unwrap()).unwrap();
+        assert_eq!(t.name, "ffmpeg");
+        assert!(t.recipe.is_some());
+
+        let wrapped = dir.join("wrapped.json");
+        std::fs::write(&wrapped, r#"{"submittedBy":"x","recipe":{"name":"inner"}}"#).unwrap();
+        assert_eq!(target(wrapped.to_str().unwrap()).unwrap().name, "inner", "a draft envelope is accepted");
+        let nameless = dir.join("nameless.json");
+        std::fs::write(&nameless, r#"{"kind":"cli"}"#).unwrap();
+        assert!(target(nameless.to_str().unwrap()).unwrap_err().contains("/name"));
+        assert!(target("./missing.json").unwrap_err().contains("missing.json"));
+
+        let (code, out) = run_client(std::path::Path::new("/nonexistent"), &["recipe".into(), "validate".into(), good.to_string_lossy().into_owned()]).unwrap();
+        assert_eq!((code, out["ok"].as_bool()), (0, Some(true)), "{out}");
+        let (code, out) = run_client(std::path::Path::new("/nonexistent"), &["recipe".into(), "validate".into(), wrapped.to_string_lossy().into_owned()]).unwrap();
+        assert_eq!(code, 1);
+        assert!(out["errors"][0]["pointer"].is_string(), "errors carry pointers: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

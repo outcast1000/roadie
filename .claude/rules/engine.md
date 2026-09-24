@@ -36,7 +36,9 @@ there first.
   `load_or_init` mints `secrets[]`, fills port defaults and expands config defaults;
   `apply_patch` validates against `recipe.config` (password `""` clears, absent keeps).
 - **cli.rs** — `--serve [--data-dir]` runs `service::run`; the legacy `--start-tool` just
-  ensures the service is up. Both are intercepted before the Tauri builder.
+  ensures the service is up. Both are intercepted before the Tauri builder. Client commands
+  include `request list` and `request <id> answer` (TTY prompt only where `prompt::surface()`
+  is `terminal`; otherwise it re-shows the request on screen).
 - **service.rs / owner.rs / actions.rs / client.rs** — the process split: see CLAUDE.md rules 3
   and 4. `service::build_id()` (exe mtime+size) is how the window detects a stale service.
 - **paths.rs** — one data root (`OnceLock`), `ToolPaths {versions, data, logs}`, `bin_dir`,

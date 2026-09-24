@@ -15,10 +15,15 @@ writing recipes from it. When a field changes, update SCHEMA.md in the same chan
 - **Built-in**: `recipes/<name>.json`, listed in `recipe::BUILTIN` (`include_str!`). A test
   (`every_builtin_validates_and_names_match`) parses all of them; an invalid built-in is a
   compile-time-adjacent failure, never a runtime surprise.
-- **User**: `<data>/recipes/<name>.json` — a draft the user trusted.
+- **User**: `<data>/recipes/<name>.json` — a draft the user trusted, or a recipe an app brought
+  with an install/upgrade request that the user approved (`store::put_trusted`). It may carry a
+  built-in's name and then replaces that built-in, until Roadie ships the built-in at a higher
+  `revision` (`store::merge`); deleting it gives the name back to the built-in.
 - **Draft**: `<data>/recipes/<name>.draft.json`, wrapped `{"submittedBy", "recipe"}`; not
   installable. `store::trust` rewrites it as a user recipe. Names are unique across all three; a
-  file that shadows a built-in is skipped with a warning.
+  draft that shadows anything is skipped with a warning.
+- **Brought**: a recipe in a request (`RequestKind::Install.recipe`, `ReplaceRecipe`), compared by
+  `store::compare` (parsed values, so key order does not count). Never on disk until approved.
 
 ## Writing one
 

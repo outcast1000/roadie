@@ -1,19 +1,23 @@
 import { useEffect, useState } from "react";
-import type { DryRun, StoredRecipe } from "../types";
+import type { DryRun, RecipeChange, StoredRecipe } from "../types";
+import { recipeChangeText } from "../install";
 import { platformLabel } from "../search";
 
 interface Props {
   stored: StoredRecipe;
   dryRun: (name: string) => Promise<DryRun>;
-  onTrust: (name: string) => Promise<void>;
-  onDelete: (name: string) => Promise<void>;
+  /** Absent for a recipe a request brought: that request's prompt approves it. */
+  onTrust?: (name: string) => Promise<void>;
+  onDelete?: (name: string) => Promise<void>;
   onClose: () => void;
+  /** Set when reviewing a recipe an app brought with a request. */
+  brought?: { requestedBy: string; change: RecipeChange };
 }
 
 /** What a recipe would do, laid out for a human: where it downloads from,
  *  what it runs, which files it writes, what it exposes. Trusting is the
  *  user's click that makes it installable. */
-export function RecipeReview({ stored, dryRun, onTrust, onDelete, onClose }: Props) {
+export function RecipeReview({ stored, dryRun, onTrust, onDelete, onClose, brought }: Props) {
   const r = stored.recipe;
   const [dry, setDry] = useState<DryRun | null>(null);
   const [dryError, setDryError] = useState<string | null>(null);
@@ -46,13 +50,16 @@ export function RecipeReview({ stored, dryRun, onTrust, onDelete, onClose }: Pro
       <header className="review-head">
         <div>
           <h2>{r.displayName}</h2>
-          <span className={`badge origin-${stored.origin}`}>{stored.origin === "draft" ? `draft${stored.submittedBy ? ` from ${stored.submittedBy}` : ""}` : stored.origin}</span>
+          <span className={`badge origin-${stored.origin}`}>
+            {brought ? `from ${brought.requestedBy}` : stored.origin === "draft" ? `draft${stored.submittedBy ? ` from ${stored.submittedBy}` : ""}` : stored.origin}
+          </span>
           <span className={`badge kind-${r.kind}`}>{r.kind}</span>
         </div>
         <button className="ghost" onClick={onClose}>
           Close
         </button>
       </header>
+      {brought ? <p className="warn-text">{brought.requestedBy} brings {recipeChangeText(brought.change)}. Read it, then approve or decline in the request: approving trusts it.</p> : null}
       <p className="summary">{r.summary}</p>
       {r.notes ? <p className="notes">{r.notes}</p> : null}
 
@@ -159,7 +166,7 @@ export function RecipeReview({ stored, dryRun, onTrust, onDelete, onClose }: Pro
       {showJson ? <pre className="mono json">{JSON.stringify(r, null, 2)}</pre> : null}
 
       <div className="actions review-actions">
-        {stored.origin !== "builtin" ? (
+        {onDelete && stored.origin !== "builtin" ? (
           <button
             className="ghost danger"
             disabled={working}
@@ -173,7 +180,12 @@ export function RecipeReview({ stored, dryRun, onTrust, onDelete, onClose }: Pro
             Delete recipe
           </button>
         ) : null}
-        {stored.origin === "draft" ? (
+        {brought ? (
+          <button className="primary" onClick={onClose}>
+            Back to the request
+          </button>
+        ) : null}
+        {onTrust && stored.origin === "draft" ? (
           <button
             className="primary"
             disabled={working}

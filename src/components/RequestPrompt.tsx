@@ -1,8 +1,9 @@
-import type { ConfigField, DryRun, RoadieRequest, StoredRecipe, ToolRow } from "../types";
+import { useCallback } from "react";
+import type { ConfigField, DryRun, Recipe, RoadieRequest, StoredRecipe, ToolRow } from "../types";
 import { InstallProgressBar } from "./ToolRow";
 import { ConfigForm } from "./ConfigForm";
 import { InstallPlan } from "./InstallPlan";
-import { installFields, isSettled, withRequestDecisions } from "../install";
+import { installFields, isSettled, recipeChangeText, withRequestDecisions } from "../install";
 
 interface Props {
   request: RoadieRequest;
@@ -11,17 +12,28 @@ interface Props {
   fields: ConfigField[];
   recipe: StoredRecipe | undefined;
   dryRun: (name: string) => Promise<DryRun>;
+  /** Dry-run a recipe the request brought (not stored). */
+  dryRunRecipe: (recipe: Recipe) => Promise<DryRun>;
   deciding: boolean;
   onDecide: (id: string, approve: boolean, answers?: Record<string, unknown>) => void;
   onReview: (name: string) => void;
+  /** Open the review screen on the recipe this request brought. */
+  onReviewBrought: (request: RoadieRequest) => void;
+  /** The user has opened that review (approving needs it). */
+  broughtReviewed: boolean;
 }
 
 /** One pending request from a local client or a deep link. Approving is the
  *  user's click that the API deliberately cannot make on its own. For an
  *  install, the recipe's `askOnInstall` fields are shown too: what the
  *  client decided is pre-filled, what it left open must be filled in. */
-export function RequestPrompt({ request: r, tool, fields, recipe, dryRun, deciding, onDecide, onReview }: Props) {
-  const name = tool?.displayName ?? r.tool;
+export function RequestPrompt({ request: r, tool, fields, recipe, dryRun, dryRunRecipe, deciding, onDecide, onReview, onReviewBrought, broughtReviewed }: Props) {
+  // A recipe the app brought takes the stored one's place: it is what the
+  // user reviews, what the decisions come from, and what approving trusts.
+  const brought = r.recipe;
+  // Keyed on the request, not the object: a refreshed list must not re-run the plan.
+  const dryRunBrought = useCallback(() => (brought ? dryRunRecipe(brought) : Promise.reject(new Error("no recipe"))), [r.id, dryRunRecipe]);
+  const name = brought?.displayName ?? tool?.displayName ?? r.tool;
   let title: string;
   let detail: string | null = null;
   switch (r.kind) {
@@ -41,10 +53,19 @@ export function RequestPrompt({ request: r, tool, fields, recipe, dryRun, decidi
       title = `${r.requestedBy} wants to connect to ${name}`;
       detail = `It will receive its own access key for ${name}. You can revoke it any time from the tool's card.`;
       break;
+    case "replaceRecipe":
+      title = `${r.requestedBy} asks to change ${name}'s recipe`;
+      detail = `${name} is installed. Approving trusts the new recipe, re-renders its files and updates it; a busy daemon is not restarted until it is idle.`;
+      break;
   }
-  const untrusted = tool && !tool.trusted;
-  const planning = r.kind === "install" && tool && !r.progress && !!recipe;
-  const decisions = planning ? installFields(fields, recipe?.recipe) : [];
+  if (brought && r.kind === "install") detail = brought.summary;
+  // A draft blocks approval unless this request brings a recipe to trust.
+  const untrusted = !brought && tool && !tool.trusted;
+  const needsReview = !!brought && !broughtReviewed;
+  const planRecipe = brought ?? recipe?.recipe;
+  const planning = r.kind === "install" && !r.progress && !!planRecipe && (!!tool || !!brought);
+  const formTool = tool ?? ({ name: r.tool, config: {} } as unknown as ToolRow);
+  const decisions = planning ? installFields(brought?.config ?? fields, planRecipe) : [];
   const decidedByClient = decisions.filter((f) => isSettled(f, undefined, r));
   const open = decisions.filter((f) => !isSettled(f, tool, r));
 
@@ -53,6 +74,15 @@ export function RequestPrompt({ request: r, tool, fields, recipe, dryRun, decidi
       <div className="prompt-body">
         <strong>{title}</strong>
         {detail ? <p>{detail}</p> : null}
+        {brought && r.recipeChange ? (
+          <p className="warn-text">
+            {r.requestedBy} brings {recipeChangeText(r.recipeChange)}, by {brought.author || "an unnamed author"} (revision {brought.revision}). Approving trusts it.{" "}
+            <button className="link" onClick={() => onReviewBrought(r)}>
+              {broughtReviewed ? "Review it again" : "Review it"}
+            </button>
+            {needsReview ? " before approving." : null}
+          </p>
+        ) : null}
         {untrusted ? (
           <p className="warn-text">
             This tool's recipe is an unreviewed draft. <button className="link" onClick={() => onReview(r.tool)}>Review it</button> before installing.
@@ -71,13 +101,13 @@ export function RequestPrompt({ request: r, tool, fields, recipe, dryRun, decidi
         ) : null}
         {r.progress ? <InstallProgressBar progress={r.progress} /> : null}
       </div>
-      {planning && recipe ? <InstallPlan recipe={recipe.recipe} dryRun={dryRun} /> : null}
-      {planning && tool ? (
+      {planning && planRecipe ? <InstallPlan recipe={planRecipe} dryRun={brought ? dryRunBrought : dryRun} /> : null}
+      {planning ? (
         <ConfigForm
-          tool={withRequestDecisions(tool, r)}
+          tool={withRequestDecisions(formTool, r)}
           fields={decisions}
-          saving={deciding}
-          submitLabel="Install"
+          saving={deciding || needsReview}
+          submitLabel={brought ? "Trust recipe and install" : "Install"}
           busyLabel="Installing…"
           sendAll
           intro={
@@ -89,7 +119,7 @@ export function RequestPrompt({ request: r, tool, fields, recipe, dryRun, decidi
           }
           onCancel={() => onDecide(r.id, false)}
           onSave={async (patch) => {
-            if (untrusted) return;
+            if (untrusted || needsReview) return;
             onDecide(r.id, true, patch);
           }}
         />
@@ -98,8 +128,8 @@ export function RequestPrompt({ request: r, tool, fields, recipe, dryRun, decidi
           <button className="ghost" disabled={deciding} onClick={() => onDecide(r.id, false)}>
             Decline
           </button>
-          <button className="primary" disabled={deciding || !!untrusted} onClick={() => onDecide(r.id, true)}>
-            {r.kind === "install" ? "Install" : r.kind === "uninstall" ? "Remove" : "Allow"}
+          <button className="primary" disabled={deciding || !!untrusted || needsReview} onClick={() => onDecide(r.id, true)}>
+            {r.kind === "install" ? (brought ? "Trust recipe and install" : "Install") : r.kind === "uninstall" ? "Remove" : r.kind === "replaceRecipe" ? "Trust recipe and update" : "Allow"}
           </button>
         </div>
       )}

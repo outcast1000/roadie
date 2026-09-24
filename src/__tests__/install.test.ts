@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { engineChoices, installFields, isSettled, withRequestDecisions } from "../install";
+import { engineChoices, installFields, isSettled, recipeChangeText, withRequestDecisions } from "../install";
 import type { ConfigField, Recipe, ToolRow } from "../types";
 
 const fields: ConfigField[] = [
@@ -37,5 +37,14 @@ describe("install decisions", () => {
   it("overlays a request's decisions onto the tool config for the form", () => {
     const merged = withRequestDecisions({ ...tool, config: { dir: "/x" } }, { config: { user: "bj" }, secretKeys: ["pw"] });
     expect(merged.config).toEqual({ dir: "/x", user: "bj", has_pw: true });
+  });
+});
+
+describe("recipeChangeText", () => {
+  it("says what an app's own recipe does to Roadie's", () => {
+    expect(recipeChangeText("new")).toMatch(/does not know yet/);
+    expect(recipeChangeText("replacesBuiltin")).toMatch(/built-in/);
+    expect(recipeChangeText("changesTrusted")).toMatch(/you trusted/);
+    expect(recipeChangeText("replacesDraft")).toMatch(/draft/);
   });
 });

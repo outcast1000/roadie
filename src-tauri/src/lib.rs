@@ -7,11 +7,16 @@
 //! `roadie` is the **window**: a Tauri client that starts the service if
 //! needed, proves itself over the owner channel, relays the user's clicks
 //! (`commands.rs` → `client.rs`) and mirrors the service's events.
+//!
+//! Built without the `window` feature, the binary is the CLI and the
+//! service only; plain `roadie` prints the usage, and requests are answered
+//! in a native dialog instead of the window (`prompt.rs`).
 
 pub mod actions;
 pub mod api;
 pub mod cli;
 pub mod client;
+#[cfg(feature = "window")]
 pub mod commands;
 pub mod consent;
 #[cfg(test)]
@@ -20,15 +25,26 @@ pub mod events;
 pub mod mcp_setup;
 pub mod owner;
 pub mod paths;
+pub mod prompt;
 pub mod recipe;
 pub mod requests;
 pub mod scheme;
 pub mod service;
 pub mod tools;
 
-use tauri::Manager;
-
+#[cfg(not(feature = "window"))]
 pub fn run() {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(code) = cli::maybe_run(&args) {
+        std::process::exit(code);
+    }
+    eprintln!("This Roadie has no window; it is driven from the command line.\n{}", cli::USAGE);
+    std::process::exit(3);
+}
+
+#[cfg(feature = "window")]
+pub fn run() {
+    use tauri::Manager;
     let args: Vec<String> = std::env::args().collect();
     // Service / legacy launcher: no window, no plugins, exit with a code.
     if let Some(code) = cli::maybe_run(&args) {

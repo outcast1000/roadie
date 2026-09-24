@@ -125,15 +125,21 @@ export interface DryRun {
 
 export type RequestStatus = "pending" | "approved" | "declined" | "done" | "failed";
 
+/** How a recipe an app brought differs from what Roadie has (`store::Change`). */
+export type RecipeChange = "new" | "replacesBuiltin" | "changesTrusted" | "replacesDraft";
+
 export interface RoadieRequest {
   id: string;
-  kind: "install" | "uninstall" | "connect";
+  kind: "install" | "uninstall" | "connect" | "replaceRecipe";
   tool: string;
   consumer?: string;
   keepData?: boolean;
   /** Install: the client's non-secret decisions; `secretKeys` names the passwords it supplied. */
   config?: Record<string, unknown>;
   secretKeys?: string[];
+  /** Install / replaceRecipe: the recipe the app brought, reviewed and trusted by approving. */
+  recipe?: Recipe;
+  recipeChange?: RecipeChange;
   returnUrl?: string;
   requestedBy: string;
   status: RequestStatus;

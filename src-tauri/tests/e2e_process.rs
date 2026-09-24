@@ -126,6 +126,7 @@ fn windows_for(root: &Path) -> Vec<u32> {
 /// Any Roadie window at all (the user's real one included). Tauri's
 /// single-instance plugin forwards a second window launch to it, so while
 /// one is open no window can appear for another data dir.
+#[cfg_attr(not(feature = "window"), allow(dead_code))]
 fn any_window_running() -> bool {
     roadie_processes().iter().any(|(_, c)| !c.contains("--serve") && !c.contains("--data-dir"))
 }
@@ -218,6 +219,7 @@ fn plain_app_mode_exits_when_idle_with_no_window() {
 }
 
 #[test]
+#[cfg(feature = "window")]
 #[ignore = "spawns the real binary and opens a window; run with --ignored"]
 fn a_request_with_no_window_opens_one() {
     let sb = Sandbox::new("window");

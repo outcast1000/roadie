@@ -164,7 +164,11 @@ fn err_with(status: StatusCode, message: impl Into<String>, extra: Value) -> Res
 }
 
 fn requested_by(req: &Request) -> String {
-    req.headers()
+    requested_by_headers(req.headers())
+}
+
+fn requested_by_headers(headers: &axum::http::HeaderMap) -> String {
+    headers
         .get("x-roadie-client")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.chars().take(60).collect())
@@ -193,6 +197,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/v1/shutdown", post(shutdown))
         .route("/v1/requests", get(list_requests))
         .route("/v1/requests/{id}", get(get_request))
+        .route("/v1/requests/{id}/prompt", get(get_request_prompt).post(reshow_request))
         .route("/v1/recipes", get(list_recipes))
         .route("/v1/recipes/schema", get(recipe_schema))
         .route("/v1/recipes/validate", post(validate_recipe))
@@ -300,6 +305,7 @@ async fn health(State(state): State<ApiState>) -> Response {
         "app": "roadie", "version": state.version, "apiVersion": API_VERSION,
         "buildId": state.build_id, "pid": std::process::id(), "role": "service",
         "windowConnected": owner::owners_connected() > 0,
+        "approvalSurface": crate::prompt::surface().name(),
     }))
     .into_response()
 }
@@ -419,7 +425,53 @@ async fn restart_tool(AxumPath(name): AxumPath<String>) -> Response {
 }
 /// Fetch and stage the latest release; applies when idle. Allowed without
 /// a prompt because the tool is already installed by the user's choice.
-async fn update_tool(AxumPath(name): AxumPath<String>) -> Response {
+/// A recipe a client sent with an install or update: valid, named like the
+/// URL, and compared with the stored one. `None` as the change means it is
+/// exactly the trusted recipe, so nothing needs reviewing.
+fn brought_recipe(name: &str, v: Value) -> Result<(Recipe, Option<store::Change>), Response> {
+    let recipe = recipe::from_value(v).map_err(|errors| {
+        (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "the recipe you sent is invalid; each error names a JSON pointer inside /recipe", "errors": errors }))).into_response()
+    })?;
+    if recipe.name != name {
+        return Err(err(StatusCode::BAD_REQUEST, format!("URL names {name} but /recipe/name is {}; use the same name", recipe.name)));
+    }
+    let change = store::compare(&recipe);
+    Ok((recipe, change))
+}
+
+/// Update an installed tool. With a `{recipe}` body that differs from the
+/// trusted one, nothing runs yet: a `replaceRecipe` request asks the user to
+/// review and trust it, and approving updates the tool (202). The same
+/// recipe, or none, updates right away.
+async fn update_tool(AxumPath(name): AxumPath<String>, headers: axum::http::HeaderMap, body: Bytes) -> Response {
+    if !body.is_empty() {
+        let v = match recipe_body(&body) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let (recipe, change) = match brought_recipe(&name, v) {
+            Ok(x) => x,
+            Err(r) => return r,
+        };
+        if let Some(change) = change {
+            let installed = match store::get_trusted(&name) {
+                Ok(current) => tools::status(&current).installed,
+                Err(_) => false,
+            };
+            if !installed {
+                return err(StatusCode::CONFLICT, format!("{} is not installed; install it with this recipe instead (POST /v1/tools/{name}/install with {{\"recipe\": …}})", recipe.display_name));
+            }
+            let by = requested_by_headers(&headers);
+            let r = requests::create(requests::RequestKind::ReplaceRecipe { tool: name, recipe: Box::new(recipe), recipe_change: change }, &by);
+            crate::scheme::focus_if_possible();
+            return (
+                StatusCode::ACCEPTED,
+                Json(json!({ "requestId": r.id, "status": r.status, "recipeChange": change,
+                    "hint": "the recipe differs from the trusted one; the user must review and approve it in Roadie, which then updates the tool. Poll GET /v1/requests/{id}." })),
+            )
+                .into_response();
+        }
+    }
     tool_action(name, |r| {
         let st = tools::status(r);
         if !st.installed {
@@ -554,32 +606,40 @@ async fn tool_logs(AxumPath(name): AxumPath<String>, Query(q): Query<HashMap<Str
 /// every decision the recipe asks for and whether it is settled.
 async fn install_tool(AxumPath(name): AxumPath<String>, req: Request) -> Response {
     let by = requested_by(&req);
-    let recipe = match trusted(&name) {
-        Ok(r) => r,
-        Err(r) => return r,
-    };
-    let body = match axum::body::to_bytes(req.into_body(), 1 << 20).await {
+    let body = match axum::body::to_bytes(req.into_body(), 4 * 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => return err(StatusCode::BAD_REQUEST, e.to_string()),
     };
-    let (values, consumer): (Map<String, Value>, Option<String>) = if body.is_empty() {
-        (Map::new(), None)
+    let (values, consumer, brought): (Map<String, Value>, Option<String>, Option<Value>) = if body.is_empty() {
+        (Map::new(), None, None)
     } else {
         match serde_json::from_slice::<Value>(&body) {
             Ok(Value::Object(m)) => {
                 let consumer = m.get("consumer").and_then(|c| c.as_str()).map(str::to_string);
+                let brought = m.get("recipe").cloned();
                 let values = match m.get("config").and_then(|c| c.as_object()) {
                     Some(c) => c.clone(),
                     None => {
                         let mut bare = m.clone();
                         bare.remove("consumer");
+                        bare.remove("recipe");
                         bare
                     }
                 };
-                (values, consumer)
+                (values, consumer, brought)
             }
-            _ => return err(StatusCode::BAD_REQUEST, "body must be a JSON object: { \"config\": { \"<key>\": <value> }, \"consumer\": \"<id>\" }"),
+            _ => return err(StatusCode::BAD_REQUEST, "body must be a JSON object: { \"config\": { \"<key>\": <value> }, \"consumer\": \"<id>\", \"recipe\": { … } }"),
         }
+    };
+    let (recipe, proposed) = match brought {
+        Some(v) => match brought_recipe(&name, v) {
+            Ok(x) => x,
+            Err(r) => return r,
+        },
+        None => match trusted(&name) {
+            Ok(r) => (r, None),
+            Err(r) => return r,
+        },
     };
     if let Some(c) = &consumer {
         if consent::get(c).is_none() {
@@ -597,6 +657,9 @@ async fn install_tool(AxumPath(name): AxumPath<String>, req: Request) -> Respons
         return err(StatusCode::UNPROCESSABLE_ENTITY, format!("config: {e}"));
     }
     let current = tools::status(&recipe).config;
+    if let Some((message, missing)) = crate::prompt::refuse_missing(&recipe, &values, &current, crate::prompt::surface()) {
+        return err_with(StatusCode::UNPROCESSABLE_ENTITY, message, json!({ "missing": missing }));
+    }
     let mut decisions: Vec<Value> = recipe
         .install_fields()
         .iter()
@@ -618,13 +681,13 @@ async fn install_tool(AxumPath(name): AxumPath<String>, req: Request) -> Respons
             }));
         }
     }
-    let r = requests::create(requests::install_kind(&recipe, values, consumer), &by);
+    let r = requests::create(requests::install_kind(&recipe, values, consumer, proposed), &by);
     crate::scheme::focus_if_possible();
     (
         StatusCode::ACCEPTED,
         Json(json!({
-            "requestId": r.id, "status": r.status, "decisions": decisions,
-            "hint": "the user must approve this in Roadie and can change or fill in any decision there; poll GET /v1/requests/{id}. With `consumer`, approval also grants that app its connection key."
+            "requestId": r.id, "status": r.status, "decisions": decisions, "recipeChange": proposed,
+            "hint": "the user must approve this in Roadie: its window lets them change or fill in any decision, a native dialog (Roadie without a window) shows them as sent; poll GET /v1/requests/{id}. With `consumer`, approval also grants that app its connection key."
         })),
     )
         .into_response()
@@ -658,6 +721,31 @@ async fn list_requests() -> Response {
 async fn get_request(AxumPath(id): AxumPath<String>) -> Response {
     match requests::get(&id) {
         Some(r) => Json(r).into_response(),
+        None => err(StatusCode::NOT_FOUND, "unknown request"),
+    }
+}
+
+/// What the user will be asked, as text, and where: a terminal client
+/// prints this before prompting on its TTY (only possible when the surface
+/// is `terminal`). Reading it grants nothing.
+async fn get_request_prompt(AxumPath(id): AxumPath<String>) -> Response {
+    match blocking(move || requests::get(&id).map(|r| (crate::prompt::describe_here(&r), r)).ok_or("unknown request".to_string())).await {
+        Ok((p, r)) => Json(json!({ "id": r.id, "status": r.status, "surface": crate::prompt::surface().name(), "prompt": p })).into_response(),
+        Err(e) => err(StatusCode::NOT_FOUND, e),
+    }
+}
+
+/// Show a pending request again on this machine's screen (a dismissed
+/// dialog, a closed window). Asking to be asked is not an answer, so the
+/// bearer token is enough.
+async fn reshow_request(AxumPath(id): AxumPath<String>) -> Response {
+    match requests::get(&id) {
+        Some(r) if r.status == requests::RequestStatus::Pending => {
+            crate::prompt::show_again(&id);
+            crate::scheme::focus_if_possible();
+            Json(json!({ "id": id, "surface": crate::prompt::surface().name() })).into_response()
+        }
+        Some(r) => err_with(StatusCode::CONFLICT, "the request is no longer pending", json!({ "status": r.status })),
         None => err(StatusCode::NOT_FOUND, "unknown request"),
     }
 }
@@ -975,6 +1063,73 @@ mod tests {
         let resp = app.clone().oneshot(req("GET", "/v1/recipes?full=true", Some(TOKEN), None)).await.unwrap();
         let v = json_of(resp).await;
         assert!(v[0]["recipe"]["recipeVersion"] == 1 && v[0]["origin"] == "builtin", "full listing returns stored recipes: {v}");
+    }
+
+    #[tokio::test]
+    async fn a_brought_recipe_rides_in_the_request_and_is_trusted_only_by_approval() {
+        let _queue = queue_lock();
+        let app = setup();
+        let owner_token = owner::register_for_test();
+        let post = |path: &str, body: Value| req("POST", path, Some(TOKEN), Some(&body.to_string()));
+
+        // Invalid or misnamed: refused with pointers, nothing queued.
+        let resp = app.clone().oneshot(post("/v1/tools/brought-demo/install", json!({ "recipe": { "name": "brought-demo" } }))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let v = json_of(resp).await;
+        assert!(v["errors"].as_array().is_some_and(|e| !e.is_empty() && e[0]["pointer"].is_string()), "{v}");
+
+        // A copy of yt-dlp that targets only another platform, so approving
+        // it fails at install without touching the network.
+        let mut theirs: Value = serde_json::from_str(recipe::BUILTIN.iter().find(|(n, _)| *n == "yt-dlp").unwrap().1).unwrap();
+        let other = if recipe::Platform::current().key().starts_with("darwin") { "linux-x64" } else { "darwin-arm64" };
+        let asset = theirs["source"]["assets"][other].clone();
+        theirs["name"] = json!("brought-demo");
+        theirs["displayName"] = json!("Brought Demo");
+        theirs["platforms"] = json!([other]);
+        theirs["source"]["assets"] = json!({ other: asset });
+        let resp = app.clone().oneshot(post("/v1/tools/elsewhere/install", json!({ "recipe": theirs }))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "the URL and /recipe/name must agree");
+
+        // The built-in itself: no review needed.
+        let stock: Value = serde_json::from_str(recipe::BUILTIN.iter().find(|(n, _)| *n == "yt-dlp").unwrap().1).unwrap();
+        let resp = app.clone().oneshot(post("/v1/tools/yt-dlp/install", json!({ "recipe": stock }))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v = json_of(resp).await;
+        assert!(v["recipeChange"].is_null(), "{v}");
+        let id = v["requestId"].as_str().unwrap().to_string();
+        assert!(requests::get(&id).is_some_and(|r| matches!(r.kind, requests::RequestKind::Install { recipe: None, .. })));
+        let _ = app.clone().oneshot(owner_req("POST", &format!("/v1/owner/requests/{id}/decide"), Some(&owner_token), Some(r#"{"approve":false}"#))).await.unwrap();
+
+        // A new recipe: it rides in the request and is saved nowhere yet.
+        let resp = app.clone().oneshot(post("/v1/tools/brought-demo/install", json!({ "recipe": theirs }))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v = json_of(resp).await;
+        assert_eq!(v["recipeChange"], "new");
+        let id = v["requestId"].as_str().unwrap().to_string();
+        let resp = app.clone().oneshot(req("GET", &format!("/v1/requests/{id}"), Some(TOKEN), None)).await.unwrap();
+        let r = json_of(resp).await;
+        assert_eq!((r["recipe"]["name"].as_str(), r["recipeChange"].as_str()), (Some("brought-demo"), Some("new")), "{r}");
+        assert!(store::get("brought-demo").is_none(), "not stored before approval");
+        let resp = app.clone().oneshot(owner_req("POST", &format!("/v1/owner/requests/{id}/decide"), Some(&owner_token), Some(r#"{"approve":false}"#))).await.unwrap();
+        assert_eq!(json_of(resp).await["status"], "declined");
+        assert!(store::get("brought-demo").is_none(), "declining stores nothing");
+
+        // Approving trusts it (then this install fails: wrong platform).
+        let resp = app.clone().oneshot(post("/v1/tools/brought-demo/install", json!({ "recipe": theirs }))).await.unwrap();
+        let id = json_of(resp).await["requestId"].as_str().unwrap().to_string();
+        let resp = app.clone().oneshot(owner_req("POST", &format!("/v1/owner/requests/{id}/decide"), Some(&owner_token), Some(r#"{"approve":true}"#))).await.unwrap();
+        assert_eq!(json_of(resp).await["status"], "failed");
+        let stored = store::get("brought-demo").expect("approval trusted the recipe");
+        assert_eq!(stored.origin, store::Origin::User);
+        assert_eq!(store::compare(&stored.recipe), None);
+
+        // Updating a tool that is not installed with a changed recipe: refused.
+        theirs["revision"] = json!(99);
+        let resp = app.clone().oneshot(post("/v1/tools/brought-demo/update", json!({ "recipe": theirs }))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        let resp = app.clone().oneshot(req("DELETE", "/v1/recipes/brought-demo", Some(TOKEN), None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

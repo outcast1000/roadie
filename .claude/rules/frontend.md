@@ -32,7 +32,10 @@ overlay. `src/types.ts` mirrors the Rust wire shapes — change it with them.
 - `RequestPrompt` — one pending request; Approve is disabled while the tool's recipe is an
   untrusted draft. An install request shows `InstallPlan` (a dry run: download, paths, files,
   ports) and a `ConfigForm` over the recipe's `askOnInstall`/`required` fields, pre-filled with
-  what the client sent (`request.config`, `secretKeys`).
+  what the client sent (`request.config`, `secretKeys`). A request that brought a recipe
+  (`request.recipe`, `recipeChange`) plans and asks from *that* recipe, links to `RecipeReview`
+  on it (read-only, no Trust/Delete: the prompt approves), and keeps its approve button
+  ("Trust recipe and install/update") disabled until that review was opened.
 - `InstallPlan` — "what will change on this computer", built from `recipe_dry_run`. Shown before
   every install, from the card (`ToolRow` Install → inline prompt) and from a request.
 - `SettingsPane` — auto-update toggle, app self-update (prompted, never silent), connected apps

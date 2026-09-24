@@ -77,8 +77,12 @@ pub fn decide(id: &str, approve: bool, answers: Option<Map<String, Value>>) -> R
     }
     requests::set_status(id, requests::RequestStatus::Approved, None);
     let outcome = match r.kind.clone() {
-        requests::RequestKind::Install { tool, consumer, config, secrets, .. } => {
-            let recipe = store::get_trusted(&tool)?;
+        requests::RequestKind::Install { tool, consumer, config, secrets, recipe, .. } => (|| {
+            // A recipe the client brought is trusted by this same click.
+            let recipe = match recipe {
+                Some(r) => adopt(*r)?,
+                None => store::get_trusted(&tool)?,
+            };
             let mut decisions = config;
             decisions.extend(secrets);
             decisions.extend(answers.unwrap_or_default());
@@ -94,7 +98,17 @@ pub fn decide(id: &str, approve: bool, answers: Option<Map<String, Value>>) -> R
             }
             events::tool_changed(&tool);
             out
-        }
+        })(),
+        requests::RequestKind::ReplaceRecipe { tool, recipe, .. } => (|| {
+            let recipe = adopt(*recipe)?;
+            if tools::status(&recipe).installed {
+                tools::check_updates(&recipe)?;
+                let mut progress = progress_reporter(tool.clone(), Some(id.to_string()));
+                tools::install(&recipe, &mut progress)?;
+            }
+            events::tool_changed(&tool);
+            Ok(())
+        })(),
         requests::RequestKind::Uninstall { tool, keep_data } => {
             let recipe = store::get_trusted(&tool)?;
             let out = tools::uninstall(&recipe, keep_data);
@@ -120,6 +134,21 @@ pub fn decide(id: &str, approve: bool, answers: Option<Map<String, Value>>) -> R
         Err(e) => requests::set_status(id, requests::RequestStatus::Failed, Some(e)),
     }
     .ok_or("gone".into())
+}
+
+/// The user approved a request that brought `recipe`: trust it, and when
+/// the tool is installed re-render its files from it (a daemon restarts
+/// when idle, as for any config change).
+fn adopt(recipe: recipe::Recipe) -> Result<recipe::Recipe, String> {
+    let stored = store::put_trusted(recipe).map_err(|e| match e {
+        store::PutError::Invalid(errors) => format!("the recipe is invalid: {}", errors.iter().map(|e| format!("{} {}", e.pointer, e.message)).collect::<Vec<_>>().join("; ")),
+        store::PutError::Conflict(m) | store::PutError::Io(m) => m,
+    })?;
+    events::emit("recipe-changed", serde_json::json!({ "name": stored.recipe.name, "origin": stored.origin }));
+    if tools::status(&stored.recipe).installed {
+        tools::configure(&stored.recipe, &Map::new())?;
+    }
+    Ok(stored.recipe)
 }
 
 /// The user read a draft and clicked Trust.

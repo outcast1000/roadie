@@ -13,7 +13,7 @@
 //! installed by a link: the window focuses the tool's row and the user
 //! clicks Install.
 
-use crate::{client, consent, events, recipe};
+use crate::{consent, events, recipe};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -115,7 +115,9 @@ pub fn parse(url: &str) -> Result<Intent, String> {
 /// channel (`actions::intent` parses it, queues a Connect request for a
 /// known consumer and emits `intent`, which comes back through the event
 /// pump), and bring the window forward.
+#[cfg(feature = "window")]
 pub fn handle(app: &tauri::AppHandle, url: &str) {
+    use crate::client;
     let url = url.to_string();
     std::thread::spawn(move || {
         if let Err(e) = client::call("POST", "/v1/owner/intent", Some(serde_json::json!({ "url": url })), true) {
@@ -126,13 +128,14 @@ pub fn handle(app: &tauri::AppHandle, url: &str) {
     focus_window(app);
 }
 
-/// Something needs the user: bring a connected window forward, or open one
-/// when none is connected (the service runs headless).
+/// Something needs the user: bring a connected window forward, or show the
+/// request wherever this service can (`service::ask_user`).
 pub fn focus_if_possible() {
     events::emit("focus-request", serde_json::Value::Null);
-    crate::service::open_window_if_needed();
+    crate::service::ask_user();
 }
 
+#[cfg(feature = "window")]
 pub fn focus_window(app: &tauri::AppHandle) {
     use tauri::Manager;
     if let Some(w) = app.get_webview_window("main") {

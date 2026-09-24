@@ -168,12 +168,12 @@ export const TOOLS = [
   { name: "start_tool", description: "Start an installed daemon. Fails if it is a cli tool or not installed.", inputSchema: { type: "object", properties: { name: str("Tool name") }, required: ["name"] } },
   { name: "stop_tool", description: "Stop a running daemon gracefully (API route, then signal).", inputSchema: { type: "object", properties: { name: str("Tool name") }, required: ["name"] } },
   { name: "restart_tool", description: "Stop then start a daemon.", inputSchema: { type: "object", properties: { name: str("Tool name") }, required: ["name"] } },
-  { name: "update_tool", description: "Fetch and stage the latest release of an installed tool; applied at once when the daemon is stopped or idle, otherwise deferred (see updateDeferredReason).", inputSchema: { type: "object", properties: { name: str("Tool name") }, required: ["name"] } },
+  { name: "update_tool", description: "Fetch and stage the latest release of an installed tool; applied at once when the daemon is stopped or idle, otherwise deferred (see updateDeferredReason). With `recipe` (the recipe your app ships) that differs from the one Roadie trusts, nothing runs yet: it returns a requestId for the user to review and trust the new recipe, and approving updates the tool. Poll request_status.", inputSchema: { type: "object", properties: { name: str("Tool name"), recipe: { type: "object", description: "Optional: the full recipe your app ships for this tool (same name). Identical to the trusted one: a plain update.", additionalProperties: true } }, required: ["name"] } },
   { name: "set_autostart", description: "Start a daemon at login (a per-user login item), or not.", inputSchema: { type: "object", properties: { name: str("Tool name"), enabled: bool("true to start at login") }, required: ["name", "enabled"] } },
   { name: "configure_tool", description: "Set non-secret config fields (see tool_status → config and the recipe's config list). Secret fields (passwords) must be entered by the user in Roadie. A running daemon is restarted when idle, else marked restartPending.", inputSchema: { type: "object", properties: { name: str("Tool name"), patch: { type: "object", description: "Field key → value", additionalProperties: true } }, required: ["name", "patch"] } },
   { name: "tool_logs", description: "Last lines of a daemon's stdout/stderr log.", inputSchema: { type: "object", properties: { name: str("Tool name"), lines: { type: "integer", description: "How many lines (default 100, max 2000)" } }, required: ["name"] } },
   { name: "get_connection", description: "A daemon's base URL (and, only with includeSecret=true, its API key) so you can configure another client. Without includeSecret the key is redacted — prefer telling the user where to approve the consuming app in Roadie.", inputSchema: { type: "object", properties: { name: str("Tool name"), includeSecret: bool("Return the API key in clear (it will be in the transcript)") }, required: ["name"] } },
-  { name: "install_tool", description: "Ask to install a tool. Nothing installs by itself: this queues a request the user approves in Roadie's window. Recipes mark the decisions an install needs (config fields with askOnInstall/required — see get_recipe); pass the ones you and the user have settled in `config`, the prompt shows them and asks the user for the rest. Returns the request id and a `decisions` list saying which are settled; poll request_status until done/failed.", inputSchema: { type: "object", properties: { name: str("Tool name (must be a trusted recipe)"), config: { type: "object", description: "Install-time decisions: field key → value (e.g. { soulseekUsername: \"…\" }). Passwords are allowed but will sit in this transcript; prefer letting the user type them in Roadie. Daemons that offer them also take the reserved booleans startNow (start right after installing) and autostart (start at login).", additionalProperties: true }, consumer: str("A registered consumer id (see list/register consumers). One approval then installs the tool AND grants that app its connection key, so it can call get_connection right after.") }, required: ["name"] } },
+  { name: "install_tool", description: "Ask to install a tool. Nothing installs by itself: this queues a request the user approves in Roadie (its window, or a native dialog when Roadie runs without one). Recipes mark the decisions an install needs (config fields with askOnInstall/required — see get_recipe); pass the ones you and the user have settled in `config`, the prompt shows them and asks the user for the rest. Where Roadie has no window (health `approvalSurface` is not \"window\"), nothing can ask, so a missing `required` value fails the call with 422 and a `missing` list. Returns the request id and a `decisions` list saying which are settled; poll request_status until done/failed.", inputSchema: { type: "object", properties: { name: str("Tool name (must be a trusted recipe)"), config: { type: "object", description: "Install-time decisions: field key → value (e.g. { soulseekUsername: \"…\" }). Passwords are allowed but will sit in this transcript; prefer letting the user type them in Roadie. Daemons that offer them also take the reserved booleans startNow (start right after installing) and autostart (start at login).", additionalProperties: true }, consumer: str("A registered consumer id (see list/register consumers). One approval then installs the tool AND grants that app its connection key, so it can call get_connection right after."), recipe: { type: "object", description: "Optional: the full recipe your app ships for this tool (same name). When Roadie has no such recipe or a different one, it rides in the request: the user reviews it in the prompt, and approving trusts it and installs (recipeChange in the reply says new/replacesBuiltin/changesTrusted/replacesDraft). Identical to the trusted recipe: an ordinary install. Validate it first with validate_recipe.", additionalProperties: true } }, required: ["name"] } },
   { name: "uninstall_tool", description: "Ask to remove a tool (a request the user approves in Roadie).", inputSchema: { type: "object", properties: { name: str("Tool name"), keepData: bool("Keep its config and state (default false)") }, required: ["name"] } },
   { name: "request_status", description: "Status of an install/uninstall/connect request: pending, approved, declined, done or failed, with install progress while running.", inputSchema: { type: "object", properties: { id: str("Request id") }, required: ["id"] } },
   { name: "list_requests", description: "Requests still waiting for the user's answer in Roadie.", inputSchema: { type: "object", properties: {} } },
@@ -198,7 +198,12 @@ export async function callTool(api, name, args = {}) {
     case "start_tool": return redact(await api.call("POST", `/v1/tools/${encodeURIComponent(need("name"))}/start`));
     case "stop_tool": return redact(await api.call("POST", `/v1/tools/${encodeURIComponent(need("name"))}/stop`));
     case "restart_tool": return redact(await api.call("POST", `/v1/tools/${encodeURIComponent(need("name"))}/restart`));
-    case "update_tool": return redact(await api.call("POST", `/v1/tools/${encodeURIComponent(need("name"))}/update`));
+    case "update_tool": {
+      const recipe = args.recipe && typeof args.recipe === "object" ? args.recipe : undefined;
+      const r = await api.call("POST", `/v1/tools/${encodeURIComponent(need("name"))}/update`, recipe ? { recipe } : undefined);
+      if (r && r.requestId) return { ...r, next: "The recipe differs from the one Roadie trusts. The user must review and approve it in Roadie; approving updates the tool. Poll request_status with this requestId." };
+      return redact(r);
+    }
     case "set_autostart": return redact(await api.call("POST", `/v1/tools/${encodeURIComponent(need("name"))}/autostart`, { enabled: !!need("enabled") }));
     case "configure_tool": return redact(await api.call("PATCH", `/v1/tools/${encodeURIComponent(need("name"))}/config`, { patch: need("patch") }));
     case "tool_logs": return await api.call("GET", `/v1/tools/${encodeURIComponent(need("name"))}/logs`, undefined, { query: { lines: args.lines } });
@@ -210,13 +215,15 @@ export async function callTool(api, name, args = {}) {
       const body = {};
       if (args.config && typeof args.config === "object") body.config = args.config;
       if (typeof args.consumer === "string" && args.consumer) body.consumer = args.consumer;
+      if (args.recipe && typeof args.recipe === "object") body.recipe = args.recipe;
       const r = await api.call("POST", `/v1/tools/${encodeURIComponent(need("name"))}/install`, Object.keys(body).length ? body : undefined);
       const open = Array.isArray(r.decisions) ? r.decisions.filter((d) => !d.settled).map((d) => d.label) : [];
-      return { ...r, next: `The user must approve this in Roadie's window${open.length ? ` and will be asked for: ${open.join(", ")}` : ""}. Poll request_status with this requestId; installation progress appears there.` };
+      const review = r.recipeChange ? " It includes the recipe you sent, which the user reviews and trusts with the same click." : "";
+      return { ...r, next: `The user must approve this in Roadie${open.length ? ` and will be asked for: ${open.join(", ")}` : ""}.${review} Poll request_status with this requestId; installation progress appears there.` };
     }
     case "uninstall_tool": {
       const r = await api.call("DELETE", `/v1/tools/${encodeURIComponent(need("name"))}`, undefined, { query: { keepData: args.keepData ? "true" : undefined } });
-      return { ...r, next: "The user must approve this in Roadie's window. Poll request_status." };
+      return { ...r, next: "The user must approve this in Roadie. Poll request_status." };
     }
     case "request_status": return await api.call("GET", `/v1/requests/${encodeURIComponent(need("id"))}`);
     case "list_requests": return await api.call("GET", "/v1/requests");
@@ -246,7 +253,8 @@ export async function callTool(api, name, args = {}) {
 const SERVER_INFO = { name: "roadie", version: "0.1.0" };
 const INSTRUCTIONS = `Roadie installs, configures, runs and updates the tools other apps need (slskd, yt-dlp, ffmpeg, …) from declarative recipes.
 Rules the API enforces: nothing installs without the user's click — install_tool/uninstall_tool queue a request the user approves in Roadie; write_recipe saves a DRAFT the user must Trust in Roadie before install. Secrets (passwords, API keys) are entered/approved in Roadie, never through here; results redact keys unless get_connection is called with includeSecret.
-Authoring a recipe: recipe_schema → get_recipe(closest built-in) → edit → validate_recipe → write_recipe → ask the user to Trust it → dryrun_recipe → install_tool → request_status.`;
+Authoring a recipe: recipe_schema → get_recipe(closest built-in) → edit → validate_recipe → write_recipe → ask the user to Trust it → dryrun_recipe → install_tool → request_status.
+An app that ships its own recipe skips the draft: install_tool/update_tool with { recipe } put it in the request, and the user reviews and trusts it in the same prompt that approves the install.`;
 
 export function handleMessage(msg, ctx) {
   const { id, method, params } = msg;

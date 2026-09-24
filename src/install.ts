@@ -1,7 +1,21 @@
 // Which config fields an install has to settle first, and which of them a
 // request already settled. Pure, so vitest covers it.
 
-import type { ConfigField, Recipe, RoadieRequest, ToolRow } from "./types";
+import type { ConfigField, Recipe, RecipeChange, RoadieRequest, ToolRow } from "./types";
+
+/** What an app's own recipe does to Roadie's, in the prompt's words. */
+export function recipeChangeText(change: RecipeChange): string {
+  switch (change) {
+    case "new":
+      return "a recipe for a tool Roadie does not know yet";
+    case "replacesBuiltin":
+      return "its own recipe, replacing Roadie's built-in one";
+    case "changesTrusted":
+      return "a changed recipe, replacing the one you trusted";
+    case "replacesDraft":
+      return "its own recipe, replacing an unreviewed draft";
+  }
+}
 
 /** The engine's own install choices, rendered like bool config fields so
  *  the same form asks them. Keys are reserved (`startNow`, `autostart`). */

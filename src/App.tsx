@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useTools } from "./hooks/useTools";
@@ -19,6 +19,9 @@ export default function App() {
   const recipes = useRecipes();
   const [tab, setTab] = useState<Tab>("tools");
   const [reviewing, setReviewing] = useState<string | null>(null);
+  // Reviewing the recipe a request brought, and which such reviews were opened.
+  const [reviewingRequest, setReviewingRequest] = useState<string | null>(null);
+  const [reviewedRequests, setReviewedRequests] = useState<Set<string>>(new Set());
   const [highlight, setHighlight] = useState<string | null>(null);
   const [consumers, setConsumers] = useState<ConsumerPublic[]>([]);
   const [intentError, setIntentError] = useState<string | null>(null);
@@ -66,6 +69,14 @@ export default function App() {
   );
 
   const reviewed = reviewing ? recipes.recipes.find((r) => r.recipe.name === reviewing) : null;
+  const broughtRequest = reviewingRequest ? requests.pending.find((r) => r.id === reviewingRequest && r.recipe) : undefined;
+  // Stable per request, or the review's dry run would re-run on every render.
+  const broughtRecipe = broughtRequest?.recipe;
+  const { dryRun: dryRunStored, dryRunRecipe } = recipes;
+  const dryRunBroughtReview = useMemo(
+    () => (broughtRecipe ? () => dryRunRecipe(broughtRecipe) : dryRunStored),
+    [broughtRequest?.id, dryRunRecipe, dryRunStored],
+  );
   const visibleTools = tools.tools.filter((t) => matchesQuery(t, query));
 
   return (
@@ -96,9 +107,15 @@ export default function App() {
                 fields={recipes.recipes.find((s) => s.recipe.name === r.tool)?.recipe.config ?? []}
                 recipe={recipes.recipes.find((s) => s.recipe.name === r.tool)}
                 dryRun={recipes.dryRun}
+                dryRunRecipe={recipes.dryRunRecipe}
                 deciding={!!requests.deciding[r.id]}
                 onDecide={(id, approve, answers) => void requests.decide(id, approve, answers)}
                 onReview={setReviewing}
+                onReviewBrought={(req) => {
+                  setReviewingRequest(req.id);
+                  setReviewedRequests((s) => new Set(s).add(req.id));
+                }}
+                broughtReviewed={reviewedRequests.has(r.id)}
               />
             ))}
           </section>
@@ -134,7 +151,14 @@ export default function App() {
         ) : null}
         {recipes.error ? <div className="callout error">{recipes.error}</div> : null}
 
-        {reviewed ? (
+        {broughtRequest?.recipe && broughtRequest.recipeChange ? (
+          <RecipeReview
+            stored={{ recipe: broughtRequest.recipe, origin: "draft", submittedBy: broughtRequest.requestedBy }}
+            dryRun={dryRunBroughtReview}
+            brought={{ requestedBy: broughtRequest.requestedBy, change: broughtRequest.recipeChange }}
+            onClose={() => setReviewingRequest(null)}
+          />
+        ) : reviewed ? (
           <RecipeReview stored={reviewed} dryRun={recipes.dryRun} onTrust={recipes.trust} onDelete={recipes.remove} onClose={() => setReviewing(null)} />
         ) : tab === "tools" ? (
           <>

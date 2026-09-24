@@ -20,7 +20,8 @@ paths:
   consumer's 403 queues a Connect request, an unknown id does **not** auto-register — a name is
   not a credential).
 - **Tier 2 (bearer, SHA-256-compared)**: start/stop/restart/update/check-updates/autostart/
-  config/logs, the request queue, recipes (`schema`, `validate`, `PUT` draft, `dryrun`,
+  config/logs, the request queue (`GET /v1/requests/{id}/prompt` is the prompt as text plus
+  `surface`; `POST` on it shows a pending request on screen again), recipes (`schema`, `validate`, `PUT` draft, `dryrun`,
   `DELETE`, `?full=true` for stored shapes), consumers, `GET /v1/events?since&wait`
   (long-poll of `events.rs`'s numbered log), `POST /v1/shutdown` (the window's handoff when it
   replaces a stale build). `DELETE /v1/tools/{name}` sits on the public router path but checks
@@ -29,21 +30,38 @@ paths:
   `/v1/owner/recipes/{name}/trust`, `/v1/owner/tools/{name}/install` (the card's click),
   `DELETE /v1/owner/tools/{name}`, `/v1/owner/intent` (deep links), `/v1/owner/settings`.
   Tokens exist only in `owner.rs`'s registry, minted for a peer that connected to the owner
-  socket **and** runs the Roadie binary (kernel-reported pid → `process::pid_exe`). A bearer
-  token never opens these; a test asserts it (`owner_routes_need_a_channel_token…`).
+  socket **and** runs the Roadie binary (kernel-reported pid → `process::pid_exe`). The peer's
+  first line says `window` or `terminal`; a terminal (the CLI answering on its TTY) is admitted
+  only when `prompt::terminal_allowed()`, i.e. the machine has no screen, and never counts as a
+  connected window. A bearer token never opens these; a test asserts it
+  (`owner_routes_need_a_channel_token…`).
 - Handlers call `tools::*` / `store::*` under `spawn_blocking` (they do network and process I/O,
   and `reqwest::blocking` cannot be built inside the runtime) and end with `events::tool_changed`.
 - Callers identify themselves with `X-Roadie-Client`; it becomes `requestedBy` on prompts.
 - Every request except the `/v1/events` long-poll counts as activity (`service::touch`) for the
-  plain-app idle exit. A handler that needs the user calls `scheme::focus_if_possible`, which
-  also opens a window when none is connected.
+  plain-app idle exit. A handler that needs the user calls `scheme::focus_if_possible` →
+  `service::ask_user`, which shows it on the approval surface (`prompt::surface()`, also in
+  `/v1/health` as `approvalSurface`): the window, a native dialog, or nothing (no screen: the
+  CLI's `request <id> answer`).
 
 ## Requests (`requests.rs`)
 
+`POST /v1/tools/{name}/install` and `/update` accept `{"recipe": …}` (the app's own recipe; must
+be valid, 422 with pointers, and named like the URL, 400). Identical to the trusted recipe: an
+ordinary install/update. Otherwise install queues an Install request carrying it, and update on
+an installed tool queues `replaceRecipe` (409 when not installed); both answer `recipeChange`.
+Approving trusts it (`actions::adopt`: save, re-render an installed tool) before acting.
+
+An install request that leaves a `required` field without a value (request, recipe default or
+stored config) is refused with 422 and `missing: [keys]` when the surface is not `window`:
+a dialog or terminal cannot ask for values (`prompt::refuse_missing`).
+
 Install and uninstall from any client, and Connect from deep links or the consent 403, are
 `Request`s: in memory, deduped while pending, `pending → approved → done|failed` or `declined`,
-with install progress mirrored in. `actions::decide`, reached only through the owner route, is
-the only place they are answered — that is the user's click. Never resolve one from a public or
+with install progress mirrored in. `actions::decide` is the only place they are answered — that
+is the user's click — reached through the owner route (window, or a terminal on a machine with
+no screen) or from the service's own dialog thread (`prompt::ask_pending`), whose answer comes
+from a dialog on the screen, never from a process. Never resolve one from a public or
 bearer handler.
 
 ## Consent (`consent.rs`)

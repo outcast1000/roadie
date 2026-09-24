@@ -27,18 +27,25 @@ branding, no Viboplr-specific code paths; Viboplr is one registered consumer amo
 2. **Nothing installs without the user's click.** Install and uninstall over the API are
    *requests* (`requests.rs`) the user approves in the window. A recipe that arrives through the
    API is a **draft** (`recipe/store.rs`) until the user reads the review screen and clicks
-   Trust. Automatic *updates* of installed tools are allowed (on by default, toggleable) but never
+   Trust. An app may instead *bring* its recipe with an install or upgrade (`{"recipe": …}`, or
+   a `.json` path in the CLI): identical to the trusted one it changes nothing; new or changed,
+   it rides in the request (`recipeChange`), the prompt shows it for review, and approving trusts
+   it (`store::put_trusted`) and then acts. It is stored nowhere before that click. Automatic *updates* of installed tools are allowed (on by default, toggleable) but never
    restart a busy daemon (`busy` check, staged versions).
 3. **Daemons are independent and loopback-only.** They outlive Roadie (detached, `setsid` /
    hidden console), bind `127.0.0.1`, stop through a ladder (recipe API route → SIGTERM or
    Ctrl-Break → kill), and start at login only because the **service** starts them in its
    startup reconcile (`ToolState.autostart`); the one login item is the service's own
    (`roadie --serve --data-dir <dir>`), never a daemon's path.
-4. **Only the window can act as the user.** Approving a request, trusting a draft, the card's
-   Install/Remove and settings are **owner routes** (`/v1/owner/*`). The bearer token does not
-   open them: an owner token comes only from the **owner channel** (`owner.rs`), a credentialed
-   local socket where the service checks the peer pid runs the Roadie binary. This is what keeps
-   rule 2 true against other programs running as the same user.
+4. **Only the user's own screen can act as the user.** Approving a request, trusting a draft,
+   the card's Install/Remove and settings are **owner routes** (`/v1/owner/*`). The bearer token
+   does not open them: an owner token comes only from the **owner channel** (`owner.rs`), a
+   credentialed local socket where the service checks the peer pid runs the Roadie binary. This
+   is what keeps rule 2 true against other programs running as the same user. The build without
+   the window (`--no-default-features`) has the service show a native dialog instead
+   (`prompt.rs`) and decide from its answer. A terminal gets an owner token only on a machine
+   with no screen, because a program can drive the CLI through a pseudo-terminal it controls.
+   There is no `--yes`, ever.
 
 ## Build, run, test
 
@@ -48,12 +55,15 @@ npm run tauri dev                       # window; it spawns `roadie --serve` (AP
 ./src-tauri/target/debug/roadie --serve # the service alone, headless (logs to <data>/logs/roadie-service.log)
 ./src-tauri/target/debug/roadie tool status slskd        # CLI client (starts the service on demand); `roadie help`
 ./src-tauri/target/debug/roadie tool install slskd --wait # asks, opens the window for approval, exits 0/1/2
+./src-tauri/target/debug/roadie tool install ./my-slskd.json --wait   # the app's own recipe: reviewed and trusted in the same prompt
 cd src-tauri && cargo test              # engine, validator, emitters, API router (tower oneshot)
 npm run test:mcp                        # node --test mcp/*.test.mjs
 npx vitest run && npx tsc --noEmit      # frontend
 cd src-tauri && cargo test --lib tools::probe -- --ignored --nocapture   # REAL install/start/stop of slskd (~60 MB download)
 npm run test:e2e                        # REAL end-to-end: src/e2e.rs (in-process service, approvals via owner channel) + tests/e2e_process.rs (real binary lifecycle)
 npm run tauri build -- --debug --bundles app   # a .app; the ONLY way to register the roadie:// scheme on macOS
+cd src-tauri && cargo build --release --no-default-features --target-dir target/cli   # CLI + service only, no Tauri; requests answered in a native dialog
+cd src-tauri && cargo test --no-default-features --target-dir target/cli             # the same tests without the window
 ```
 
 - `roadie://` deep links do not work under `tauri dev` on macOS — LaunchServices learns the
@@ -77,8 +87,13 @@ npm run tauri build -- --debug --bundles app   # a .app; the ONLY way to registe
 - Tauri's single-instance plugin means one window per user: a second launch is forwarded to
   the open window, so a window for another data dir cannot open while one is up.
 - Three clients speak to the service: the window (owner channel), the MCP server, and the CLI
-  (`roadie tool|request|service …`, `cli.rs`). The CLI never holds an owner token: it can ask,
-  never approve.
+  (`roadie tool|request|service …`, `cli.rs`). The CLI asks; it approves only through
+  `roadie request <id> answer` on a real TTY of a machine with no screen (SSH, headless), where
+  the owner channel admits it as a `terminal`. Elsewhere `answer` re-shows the request on screen.
+- Where a request is shown is `prompt::surface()` (`approvalSurface` in `/v1/health`): `window`
+  in the desktop build, `dialog` without it (osascript / MessageBoxW / zenity or kdialog, text
+  passed as arguments, never as script), `terminal` when the OS says there is no screen (macOS
+  session graphic access, Windows visible window station, Linux `DISPLAY`/`WAYLAND_DISPLAY`).
 - Driving the running app from a shell: read the token from `roadie-api.json` and curl
   `127.0.0.1:47630` — or speak MCP to `mcp/roadie-mcp.mjs` over stdio, as a client would.
 
@@ -91,7 +106,8 @@ npm run tauri build -- --debug --bundles app   # a .app; the ONLY way to registe
 | `src-tauri/src/tools/` | the interpreter: `mod.rs` (status, liveness, install/start/stop/configure, reconcile, auto-update, dry run), `install.rs`, `process.rs`, `autostart.rs`, `state.rs`, `probe.rs` |
 | `src-tauri/src/api/` | axum local API: public tier, bearer tier (incl. `/v1/events` long-poll), owner tier, requests, recipes, consumers |
 | `src-tauri/src/{service,owner,actions,client}.rs` | the service entry point; the owner channel; the user's actions (decide/trust/install-now); the window's HTTP client + event pump |
-| `src-tauri/src/{scheme,consent,requests,events,cli,commands,mcp_setup,paths}.rs` | deep links, consumer grants, approval queue, event log, CLI modes, Tauri commands (relays) |
+| `src-tauri/src/{scheme,consent,requests,events,cli,commands,mcp_setup,paths}.rs` | deep links, consumer grants, approval queue, event log, CLI modes, Tauri commands (relays; `window` feature only) |
+| `src-tauri/src/prompt.rs` | approval surface: prompt text for a request, native dialogs, "is there a screen", the service's dialog queue |
 | `src/` | React window: `hooks/`, `components/` (ToolRow, ConfigForm, RecipeReview, RequestPrompt, SettingsPane) |
 | `mcp/` | dependency-free stdio MCP server, bundled into `Resources/mcp/` |
 

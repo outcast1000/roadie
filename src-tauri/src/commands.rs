@@ -115,9 +115,10 @@ pub async fn recipe_trust(name: String) -> Result<Value, String> {
 pub async fn recipe_delete(name: String) -> Result<(), String> {
     relay("DELETE", format!("/v1/recipes/{}", enc(&name)), None, false).await.map(|_| ())
 }
+/// `recipe`: dry-run a recipe that is not stored (one a request brought).
 #[tauri::command]
-pub async fn recipe_dry_run(name: String) -> Result<Value, String> {
-    relay("POST", format!("/v1/recipes/{}/dryrun", enc(&name)), None, false).await
+pub async fn recipe_dry_run(name: String, recipe: Option<Value>) -> Result<Value, String> {
+    relay("POST", format!("/v1/recipes/{}/dryrun", enc(&name)), recipe.map(|r| serde_json::json!({ "recipe": r })), false).await
 }
 
 // --- Consumers + requests ---

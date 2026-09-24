@@ -63,6 +63,25 @@ test("install_tool sends the client header and returns the approval hint", async
   assert.equal(call.headers["X-Roadie-Client"], "MCP client");
 });
 
+test("install_tool and update_tool carry the app's own recipe", async () => {
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, "roadie-api.json"), JSON.stringify({ port: 47630, token: "a".repeat(64) }));
+  const f = fakeFetch(47630, {
+    "POST /v1/tools/demo/install": [202, { requestId: "r2", status: "pending", recipeChange: "new", decisions: [] }],
+    "POST /v1/tools/demo/update": [202, { requestId: "r3", status: "pending", recipeChange: "changesTrusted" }],
+  });
+  const api = new Api(dir, f);
+  const recipe = { name: "demo", revision: 2 };
+  const out = await callTool(api, "install_tool", { name: "demo", recipe });
+  assert.equal(out.recipeChange, "new");
+  assert.match(out.next, /reviews and trusts/);
+  assert.deepEqual(JSON.parse(f.calls.find((c) => c.url === "/v1/tools/demo/install").body).recipe, recipe);
+  const up = await callTool(api, "update_tool", { name: "demo", recipe });
+  assert.equal(up.requestId, "r3");
+  assert.match(up.next, /review and approve/);
+  assert.deepEqual(JSON.parse(f.calls.find((c) => c.url === "/v1/tools/demo/update").body).recipe, recipe);
+});
+
 test("write_recipe forwards validation errors with pointers", async () => {
   const dir = tmp();
   fs.writeFileSync(path.join(dir, "roadie-api.json"), JSON.stringify({ port: 47630, token: "a".repeat(64) }));

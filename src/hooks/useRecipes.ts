@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { DryRun, StoredRecipe } from "../types";
+import type { DryRun, Recipe, StoredRecipe } from "../types";
 
 export function useRecipes() {
   const [recipes, setRecipes] = useState<StoredRecipe[]>([]);
@@ -52,7 +52,9 @@ export function useRecipes() {
     [refresh],
   );
 
-  const dryRun = useCallback(async (name: string) => invoke<DryRun>("recipe_dry_run", { name }), []);
+  const dryRun = useCallback(async (name: string) => invoke<DryRun>("recipe_dry_run", { name, recipe: null }), []);
+  /** A recipe that is not stored: one an app brought with a request. */
+  const dryRunRecipe = useCallback(async (recipe: Recipe) => invoke<DryRun>("recipe_dry_run", { name: recipe.name, recipe }), []);
 
-  return { recipes, drafts: recipes.filter((r) => r.origin === "draft"), error, refresh, trust, remove, dryRun };
+  return { recipes, drafts: recipes.filter((r) => r.origin === "draft"), error, refresh, trust, remove, dryRun, dryRunRecipe };
 }
