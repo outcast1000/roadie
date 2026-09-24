@@ -98,46 +98,48 @@ fn pid_alive(pid: u32) -> bool {
     }
 }
 
-/// Window processes the service opened for this sandbox (`roadie --data-dir <root>`).
-#[cfg(unix)]
-fn windows_for(root: &Path) -> Vec<u32> {
+/// `(pid, command line)` of every running Roadie binary.
+fn roadie_processes() -> Vec<(u32, String)> {
+    #[cfg(unix)]
     let out = Command::new("ps").args(["-axo", "pid=,command="]).output().unwrap();
-    let needle = format!("--data-dir {}", root.display());
+    #[cfg(windows)]
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='roadie.exe'\" | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }"])
+        .output()
+        .unwrap();
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter(|l| l.contains(BIN) && l.contains(&needle) && !l.contains("--serve"))
-        .filter_map(|l| l.trim().split_whitespace().next()?.parse().ok())
+        .filter(|l| l.contains(BIN))
+        .filter_map(|l| {
+            let (pid, cmd) = l.trim().split_once(' ')?;
+            Some((pid.parse().ok()?, cmd.to_string()))
+        })
         .collect()
 }
-#[cfg(not(unix))]
-fn windows_for(_root: &Path) -> Vec<u32> {
-    Vec::new()
+
+/// Window processes the service opened for this sandbox (`roadie --data-dir <root>`).
+fn windows_for(root: &Path) -> Vec<u32> {
+    let root = root.display().to_string();
+    roadie_processes().into_iter().filter(|(_, c)| c.contains("--data-dir") && c.contains(&root) && !c.contains("--serve")).map(|(p, _)| p).collect()
 }
 
 /// Any Roadie window at all (the user's real one included). Tauri's
 /// single-instance plugin forwards a second window launch to it, so while
 /// one is open no window can appear for another data dir.
-#[cfg(unix)]
 fn any_window_running() -> bool {
-    let out = Command::new("ps").args(["-axo", "pid=,command="]).output().unwrap();
-    String::from_utf8_lossy(&out.stdout).lines().any(|l| l.contains(BIN) && !l.contains("--serve") && !l.contains("--data-dir"))
-}
-#[cfg(not(unix))]
-fn any_window_running() -> bool {
-    false
+    roadie_processes().iter().any(|(_, c)| !c.contains("--serve") && !c.contains("--data-dir"))
 }
 
 fn kill_windows_for(root: &Path) {
-    #[cfg(unix)]
     for pid in windows_for(root) {
+        #[cfg(unix)]
         unsafe {
             libc::kill(pid as i32, libc::SIGTERM);
         }
+        #[cfg(windows)]
+        let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output();
     }
-    #[cfg(not(unix))]
-    let _ = root;
 }
-
 #[test]
 #[ignore = "spawns the real binary; run with --ignored"]
 fn cli_starts_the_service_on_demand_and_stops_it() {
@@ -217,7 +219,6 @@ fn plain_app_mode_exits_when_idle_with_no_window() {
 
 #[test]
 #[ignore = "spawns the real binary and opens a window; run with --ignored"]
-#[cfg(unix)]
 fn a_request_with_no_window_opens_one() {
     let sb = Sandbox::new("window");
     let (code, v, err) = sb.roadie(&["--as", "Viboplr (e2e)", "tool", "install", "slskd", "--consumer", "viboplr", "--set", "soulseekUsername=e2e"]);

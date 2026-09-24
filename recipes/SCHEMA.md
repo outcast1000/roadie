@@ -106,6 +106,8 @@ level, each `{ "default": true|false, "askOnInstall": true|false }`; the prompt 
 default and the user can flip it. Passing either key for a recipe that does not offer it is a
 422. Roadie's own Start/Stop on the tool's card work regardless.
 
+Write `path` defaults with `/` (`{home}/Music/Tool`); on Windows the expanded default gets `\`.
+
 `password` fields must be `secret: true` and go to `{secrets.key}`; everything else is
 `{config.key}`. Patching a password with `""` clears it; omitting the key keeps it.
 

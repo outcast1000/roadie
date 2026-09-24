@@ -92,6 +92,12 @@ fn fill(recipe: &Recipe, s: &mut ToolState, data_dir: &Path, platform: &recipe::
                 Value::String(t) => recipe::template::expand(t, &ctx)?,
                 other => other.clone(),
             };
+            // Recipes write `{home}/Music/x`; on Windows `{home}` is `C:\Users\…`, so a path
+            // default would come out half and half. Give it the platform's separator.
+            let v = match v {
+                Value::String(p) if f.kind == FieldKind::Path && platform.os == "windows" => Value::String(p.replace('/', "\\")),
+                other => other,
+            };
             s.config.insert(f.key.clone(), v);
             dirty = true;
         }
@@ -205,6 +211,20 @@ mod tests {
         let b = load_or_init(&r, &dir, &Platform::current()).unwrap();
         assert_eq!(a.secrets, b.secrets, "secrets must be stable across loads");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn path_defaults_use_the_platform_separator() {
+        let r = slskd();
+        let win = Platform { os: "windows", arch: "x64" };
+        let mut s = ToolState::default();
+        fill(&r, &mut s, Path::new("C:\\data"), &win).unwrap();
+        let d = s.config["downloadsDir"].as_str().unwrap();
+        assert!(!d.contains('/') && d.ends_with("\\Music\\Soulseek"), "{d}");
+        let mac = Platform { os: "darwin", arch: "arm64" };
+        let mut s = ToolState::default();
+        fill(&r, &mut s, Path::new("/data"), &mac).unwrap();
+        assert!(s.config["downloadsDir"].as_str().unwrap().ends_with("/Music/Soulseek"));
     }
 
     #[test]

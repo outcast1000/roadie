@@ -26,9 +26,11 @@ const CLIENT_HEADER = "MCP client";
 // --- Discovery -----------------------------------------------------------
 
 export function defaultDataDir(platform = process.platform, home = os.homedir(), env = process.env) {
-  if (platform === "darwin") return path.join(home, "Library", "Application Support", IDENTIFIER);
-  if (platform === "win32") return path.join(env.APPDATA || path.join(home, "AppData", "Roaming"), IDENTIFIER);
-  return path.join(env.XDG_DATA_HOME || path.join(home, ".local", "share"), IDENTIFIER);
+  // Join with the target platform's separator, not the host's, so the answer is the same wherever it is computed.
+  const p = platform === "win32" ? path.win32 : path.posix;
+  if (platform === "darwin") return p.join(home, "Library", "Application Support", IDENTIFIER);
+  if (platform === "win32") return p.join(env.APPDATA || p.join(home, "AppData", "Roaming"), IDENTIFIER);
+  return p.join(env.XDG_DATA_HOME || p.join(home, ".local", "share"), IDENTIFIER);
 }
 
 function argValue(name) {

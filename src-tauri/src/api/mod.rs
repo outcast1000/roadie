@@ -852,6 +852,13 @@ mod tests {
         build_router(ApiState { token: Arc::new(TOKEN.into()), version: "0.0.0-test".into(), build_id: "test-build".into() })
     }
 
+    /// The request queue is process-global and dedupes a pending install per tool, so tests that
+    /// queue a `slskd` install would answer each other's request if they ran in parallel.
+    fn queue_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn owner_req(method: &str, path: &str, owner_token: Option<&str>, body: Option<&str>) -> HttpRequest<Body> {
         let mut r = req(method, path, None, body);
         if let Some(t) = owner_token {
@@ -926,6 +933,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_is_a_request_not_an_action() {
+        let _queue = queue_lock();
         let app = setup();
         let resp = app.clone().oneshot(req("POST", "/v1/tools/slskd/install", Some(TOKEN), None)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
@@ -941,6 +949,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_routes_need_a_channel_token_and_decide_a_request() {
+        let _queue = queue_lock();
         let app = setup();
         // A bearer token is not enough: same-user programs hold one.
         let mut r = req("POST", "/v1/owner/recipes/slskd/trust", Some(TOKEN), None);
@@ -986,6 +995,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_body_carries_decisions_without_echoing_secrets() {
+        let _queue = queue_lock();
         let app = setup();
         let body = r#"{"config":{"soulseekUsername":"bj","soulseekPassword":"hunter2"}}"#;
         let resp = app.clone().oneshot(req("POST", "/v1/tools/slskd/install", Some(TOKEN), Some(body))).await.unwrap();

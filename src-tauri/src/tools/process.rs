@@ -20,6 +20,8 @@ pub const LAUNCHER_LOG: &str = "launcher.log";
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
 pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+#[cfg(windows)]
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,9 +98,28 @@ pub fn spawn_detached(p: &SpawnPlan) -> Result<u32, String> {
         use std::os::windows::process::CommandExt;
         // A *hidden* console rather than DETACHED_PROCESS: the Ctrl-Break
         // fallback needs a console to attach to.
-        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+        // Out of our Job object too, when it allows that: a launcher, terminal or CI runner
+        // that kills its job on close would otherwise take the daemon (or the service) with it.
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
+        // CreateProcess passes on *every* inheritable handle, and our own std handles are
+        // inheritable when a caller piped them to us (PowerShell, `Command::output`). The
+        // child would then hold the caller's pipe open until it exits, so `roadie tool …`'s
+        // output never reaches EOF while the service it started runs. The handles meant for
+        // the child are fresh duplicates made by std, so ours need not be inheritable.
+        unsafe { win::disinherit_std_handles() };
     }
-    let mut child = cmd.spawn().map_err(|e| format!("failed to start {}: {e}", p.exe.display()))?;
+    let spawned = cmd.spawn();
+    // A job without JOB_OBJECT_LIMIT_BREAKAWAY_OK refuses the breakaway with access denied;
+    // start inside the job then, which is still better than not starting.
+    #[cfg(windows)]
+    let spawned = match spawned {
+        Err(e) if e.raw_os_error() == Some(5) => {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP).spawn()
+        }
+        other => other,
+    };
+    let mut child = spawned.map_err(|e| format!("failed to start {}: {e}", p.exe.display()))?;
     let pid = child.id();
     std::thread::spawn(move || {
         let _ = child.wait();
@@ -277,6 +298,21 @@ mod win {
         fn AttachConsole(pid: DWORD) -> BOOL;
         fn SetConsoleCtrlHandler(handler: *const std::ffi::c_void, add: BOOL) -> BOOL;
         fn GenerateConsoleCtrlEvent(event: DWORD, group: DWORD) -> BOOL;
+        fn GetStdHandle(which: DWORD) -> HANDLE;
+        fn SetHandleInformation(h: HANDLE, mask: DWORD, flags: DWORD) -> BOOL;
+    }
+
+    const STD_HANDLES: [DWORD; 3] = [-10i32 as DWORD, -11i32 as DWORD, -12i32 as DWORD];
+    const HANDLE_FLAG_INHERIT: DWORD = 0x1;
+
+    /// Stop our stdin/stdout/stderr from leaking into children we spawn.
+    pub unsafe fn disinherit_std_handles() {
+        for which in STD_HANDLES {
+            let h = GetStdHandle(which);
+            if !h.is_null() && h != (-1isize as HANDLE) {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
     }
 
     pub unsafe fn pid_alive(pid: u32) -> bool {

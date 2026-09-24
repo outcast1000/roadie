@@ -26,7 +26,7 @@ function fakeFetch(port, routes = {}) {
 
 test("default data dir follows the OS conventions", () => {
   assert.equal(defaultDataDir("darwin", "/Users/a", {}), "/Users/a/Library/Application Support/com.outcast1000.roadie");
-  assert.equal(defaultDataDir("win32", "C:\\Users\\a", { APPDATA: "C:\\Users\\a\\AppData\\Roaming" }), path.join("C:\\Users\\a\\AppData\\Roaming", "com.outcast1000.roadie"));
+  assert.equal(defaultDataDir("win32", "C:\\Users\\a", { APPDATA: "C:\\Users\\a\\AppData\\Roaming" }), "C:\\Users\\a\\AppData\\Roaming\\com.outcast1000.roadie");
   assert.equal(defaultDataDir("linux", "/home/a", {}), "/home/a/.local/share/com.outcast1000.roadie");
 });
 

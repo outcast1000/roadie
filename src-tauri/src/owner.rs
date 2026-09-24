@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 pub const HEADER: &str = "x-roadie-owner";
+#[cfg(unix)]
 const SOCKET_NAME: &str = "owner.sock";
 
 fn tokens() -> &'static Mutex<HashSet<String>> {
@@ -161,17 +162,30 @@ pub fn serve(data_root: &Path) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
+        // The first instance exists before `serve` returns (like `bind` on unix), and each
+        // next one is created before a connected one is handed off, so a client never finds
+        // the name missing for longer than `connect`'s retry.
+        let mut listening = win::create(&path)?;
         std::thread::Builder::new()
             .name("owner-channel".into())
             .spawn(move || loop {
-                match win::accept(&path) {
-                    Ok((pipe, pid)) => {
-                        std::thread::spawn(move || serve_peer(pipe, pid));
+                let waited = win::wait(&listening);
+                if let Err(e) = &waited {
+                    log::warn!("owner channel: {e}");
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                let next = loop {
+                    match win::create(&path) {
+                        Ok(p) => break p,
+                        Err(e) => {
+                            log::warn!("owner channel: {e}");
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
                     }
-                    Err(e) => {
-                        log::warn!("owner channel: {e}");
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                    }
+                };
+                let connected = std::mem::replace(&mut listening, next);
+                if let Ok(pid) = waited {
+                    std::thread::spawn(move || serve_peer(connected, pid));
                 }
             })
             .map_err(|e| format!("owner channel thread: {e}"))?;
@@ -186,7 +200,21 @@ pub fn connect(data_root: &Path) -> Result<String, String> {
     #[cfg(unix)]
     let stream = std::os::unix::net::UnixStream::connect(&path).map_err(|e| format!("owner channel {}: {e}", path.display()))?;
     #[cfg(windows)]
-    let stream = std::fs::OpenOptions::new().read(true).write(true).open(&path).map_err(|e| format!("owner channel {}: {e}", path.display()))?;
+    let stream = {
+        // Between two clients the service is re-creating the listening instance: the name is
+        // briefly missing (2) or busy (231). Retry for a moment rather than failing the window.
+        let mut tries = 0;
+        loop {
+            match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+                Ok(s) => break s,
+                Err(e) if tries < 40 && matches!(e.raw_os_error(), Some(2) | Some(231)) => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => return Err(format!("owner channel {}: {e}", path.display())),
+            }
+        }
+    };
     let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
     let mut line = String::new();
     reader.read_line(&mut line).map_err(|e| format!("owner channel read: {e}"))?;
@@ -291,8 +319,8 @@ mod win {
         }
     }
 
-    /// Create one pipe instance and block until a client connects.
-    pub fn accept(path: &Path) -> Result<(Pipe, Option<u32>), String> {
+    /// Create one listening pipe instance.
+    pub fn create(path: &Path) -> Result<Pipe, String> {
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
         let h = unsafe {
             CreateNamedPipeW(
@@ -307,20 +335,28 @@ mod win {
             )
         };
         if h == INVALID_HANDLE_VALUE {
-            return Err(format!("CreateNamedPipe failed: {}", unsafe { GetLastError() }));
+            return Err(format!("CreateNamedPipe {}: error {}", path.display(), unsafe { GetLastError() }));
         }
-        let pipe = Pipe(h);
-        let ok = unsafe { ConnectNamedPipe(h, std::ptr::null_mut()) };
-        if ok == 0 && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
-            return Err(format!("ConnectNamedPipe failed: {}", unsafe { GetLastError() }));
+        Ok(Pipe(h))
+    }
+
+    /// Block until a client connects to `pipe`; the kernel-reported client pid.
+    pub fn wait(pipe: &Pipe) -> Result<Option<u32>, String> {
+        let ok = unsafe { ConnectNamedPipe(pipe.0, std::ptr::null_mut()) };
+        if ok == 0 {
+            let err = unsafe { GetLastError() };
+            if err != ERROR_PIPE_CONNECTED {
+                unsafe { DisconnectNamedPipe(pipe.0) };
+                return Err(format!("ConnectNamedPipe: error {err}"));
+            }
         }
         let mut pid = 0u32;
-        let got = unsafe { GetNamedPipeClientProcessId(h, &mut pid) };
-        Ok((pipe, (got != 0 && pid != 0).then_some(pid)))
+        let got = unsafe { GetNamedPipeClientProcessId(pipe.0, &mut pid) };
+        Ok((got != 0 && pid != 0).then_some(pid))
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -342,7 +378,10 @@ mod tests {
         assert!(!is_owner("0000000000000000000000000000000000000000000000000000000000000000"));
         assert!(!is_owner(""));
         assert!(peer_is_roadie(std::process::id()));
+        #[cfg(unix)]
         assert!(!peer_is_roadie(1), "launchd/init is not Roadie");
+        #[cfg(windows)]
+        assert!(!peer_is_roadie(4), "the System process is not Roadie");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
