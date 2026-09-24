@@ -1,0 +1,48 @@
+[package]
+name = "roadie"
+version = "0.1.0"
+description = "Roadie — installs, configures and runs the tools your apps need"
+authors = ["outcast1000"]
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "roadie_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-deep-link = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+log = "0.4"
+env_logger = "0.11"
+chrono = "0.4"
+regex = "1"
+reqwest = { version = "0.13", features = ["blocking", "json"] }
+sha2 = "0.10"
+# OS entropy for the API bearer token and tool secrets — the minimal primitive
+# rather than the full rand crate.
+getrandom = "0.3"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

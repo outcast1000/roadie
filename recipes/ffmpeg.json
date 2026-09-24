@@ -1,0 +1,83 @@
+{
+  "recipeVersion": 1,
+  "name": "ffmpeg",
+  "displayName": "FFmpeg",
+  "author": "Roadie",
+  "revision": 1,
+  "summary": "Converts, merges and inspects audio and video. yt-dlp needs it to merge separate streams; players use it to transcode.",
+  "homepage": "https://ffmpeg.org",
+  "license": "GPL-3.0 (static builds)",
+  "notes": "Apple Silicon builds are Martin Riedl's signed static releases (ffmpeg only — ffprobe is a separate download there). Windows builds are BtbN's GPL master builds and include ffprobe. Intel Macs and Linux are not covered by this recipe yet; use Homebrew or your package manager there.",
+  "kind": "cli",
+  "platforms": ["darwin-arm64", "windows-x64", "windows-arm64"],
+  "source": {
+    "kind": "htmlIndex",
+    "page": "https://ffmpeg.martin-riedl.de/",
+    "links": {
+      "darwin-arm64": "^/download/macos/arm64/\\d+_(\\d+\\.\\d+(?:\\.\\d+)?)/ffmpeg\\.zip$"
+    },
+    "checksums": {
+      "kind": "sidecar",
+      "suffix": ".sha256"
+    }
+  },
+  "archive": "zip",
+  "layout": {
+    "stripTopDir": false,
+    "binaries": [
+      "ffmpeg"
+    ]
+  },
+  "overrides": {
+    "windows-x64": {
+      "source": {
+        "kind": "githubRelease",
+        "repo": "BtbN/FFmpeg-Builds",
+        "tagStyle": "floating:latest",
+        "assets": {
+          "windows-x64": "ffmpeg-master-latest-win64-gpl.zip"
+        },
+        "checksums": {
+          "kind": "sumsFile",
+          "asset": "checksums.sha256"
+        }
+      },
+      "layout": {
+        "stripTopDir": true,
+        "binaries": [
+          "bin/ffmpeg",
+          "bin/ffprobe"
+        ]
+      }
+    },
+    "windows-arm64": {
+      "source": {
+        "kind": "githubRelease",
+        "repo": "BtbN/FFmpeg-Builds",
+        "tagStyle": "floating:latest",
+        "assets": {
+          "windows-arm64": "ffmpeg-master-latest-winarm64-gpl.zip"
+        },
+        "checksums": {
+          "kind": "sumsFile",
+          "asset": "checksums.sha256"
+        }
+      },
+      "layout": {
+        "stripTopDir": true,
+        "binaries": [
+          "bin/ffmpeg",
+          "bin/ffprobe"
+        ]
+      }
+    }
+  },
+  "minBinaryBytes": 20000000,
+  "version": {
+    "args": [
+      "-version"
+    ],
+    "regex": "ffmpeg version [nN]?(\\d+\\.\\d+(?:\\.\\d+)?)",
+    "timeoutSec": 60
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "recipeVersion": 1,
+  "name": "yt-dlp",
+  "displayName": "yt-dlp",
+  "author": "Roadie",
+  "revision": 1,
+  "summary": "Downloads audio and video from YouTube and hundreds of other sites. Music apps use it to fetch tracks and streams.",
+  "homepage": "https://github.com/yt-dlp/yt-dlp",
+  "license": "Unlicense (the binaries bundle GPLv3+ libraries)",
+  "notes": "Roadie keeps this copy up to date — never run `yt-dlp -U` on it, the two would fight. Merging separate audio and video streams needs ffmpeg: pass `--ffmpeg-location` with Roadie's ffmpeg. Security fixes land in the monthly stable release, so leave automatic updates on.",
+  "kind": "cli",
+  "platforms": ["darwin-arm64", "darwin-x64", "windows-x64", "windows-arm64", "linux-x64", "linux-arm64"],
+  "source": {
+    "kind": "githubRelease",
+    "repo": "yt-dlp/yt-dlp",
+    "tagStyle": "plain",
+    "assets": {
+      "darwin-arm64": "yt-dlp_macos",
+      "darwin-x64": "yt-dlp_macos",
+      "windows-x64": "yt-dlp.exe",
+      "windows-arm64": "yt-dlp_arm64.exe",
+      "linux-x64": "yt-dlp_linux",
+      "linux-arm64": "yt-dlp_linux_aarch64"
+    },
+    "checksums": {
+      "kind": "sumsFile",
+      "asset": "SHA2-256SUMS"
+    }
+  },
+  "archive": "bare",
+  "layout": {
+    "binaries": [
+      "yt-dlp"
+    ]
+  },
+  "minBinaryBytes": 1000000,
+  "version": {
+    "args": [
+      "--version"
+    ],
+    "regex": "(\\d{4}\\.\\d{2}\\.\\d{2})",
+    "timeoutSec": 120
+  }
+}

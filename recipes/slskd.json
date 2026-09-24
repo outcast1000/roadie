@@ -1,0 +1,144 @@
+{
+  "recipeVersion": 1,
+  "name": "slskd",
+  "displayName": "slskd",
+  "author": "Roadie",
+  "revision": 1,
+  "summary": "Soulseek client with a web UI and HTTP API. Music apps use it to search and download from the Soulseek network.",
+  "homepage": "https://github.com/slskd/slskd",
+  "license": "AGPL-3.0",
+  "notes": "slskd is a machine-wide singleton: a copy you run yourself blocks this one. The web UI stays on, bound to 127.0.0.1, behind generated credentials — that is what gives every OS a graceful stop.",
+  "kind": "daemon",
+
+  "platforms": ["darwin-arm64", "darwin-x64", "windows-x64", "windows-arm64", "linux-x64"],
+  "startAfterInstall": { "default": true, "askOnInstall": true },
+  "autostart": { "default": true, "askOnInstall": true },
+  "source": {
+    "kind": "githubRelease",
+    "repo": "slskd/slskd",
+    "tagStyle": "plain",
+    "assets": {
+      "darwin-arm64": "slskd-{version}-osx-arm64.zip",
+      "darwin-x64": "slskd-{version}-osx-x64.zip",
+      "windows-x64": "slskd-{version}-win-x64.zip",
+      "windows-arm64": "slskd-{version}-win-arm64.zip",
+      "linux-x64": "slskd-{version}-linux-x64.zip"
+    },
+    "checksums": { "kind": "none" }
+  },
+  "archive": "zip",
+  "layout": { "stripTopDir": false, "binaries": ["slskd"] },
+  "minBinaryBytes": 20000000,
+  "version": { "args": ["--version"], "regex": "(\\d+\\.\\d+\\.\\d+)", "timeoutSec": 60 },
+
+  "secrets": [
+    { "key": "internalKey", "generate": "hex48" },
+    { "key": "webPassword", "generate": "hex32" }
+  ],
+  "ports": {
+    "web": { "default": 5030, "pick": true },
+    "listen": { "default": 50300, "pick": false }
+  },
+  "config": [
+    { "key": "soulseekUsername", "label": "Soulseek username", "kind": "text", "askOnInstall": true,
+      "help": "Your Soulseek account. slskd runs without one but cannot search until you sign in." },
+    { "key": "soulseekPassword", "label": "Soulseek password", "kind": "password", "secret": true, "askOnInstall": true },
+    { "key": "downloadsDir", "label": "Downloads folder", "kind": "path", "default": "{home}/Music/Soulseek",
+      "tccSensitive": true, "createDir": true, "askOnInstall": true },
+    { "key": "shareDownloads", "label": "Share my downloads folder", "kind": "bool", "default": true,
+      "help": "Soulseek is give-and-take: users who share nothing get queued behind everyone else." }
+  ],
+  "connection": {
+    "policy": "perConsumerKey",
+    "minLen": 16,
+    "maxLen": 255,
+    "url": "http://127.0.0.1:{ports.web}"
+  },
+
+  "createDirs": ["{config.downloadsDir}/.incomplete", "{data}/app", "{data}/extract"],
+  "files": [
+    {
+      "path": "{data}/slskd.yml",
+      "format": "yaml",
+      "secret": true,
+      "content": {
+        "headless": false,
+        "remote_configuration": false,
+        "remote_file_management": true,
+        "flags": { "no_logo": true, "no_version_check": true },
+        "directories": {
+          "downloads": "{config.downloadsDir}",
+          "incomplete": "{config.downloadsDir}/.incomplete"
+        },
+        "shares": {
+          "directories": { "$if": "config.shareDownloads", "then": ["{config.downloadsDir}"], "else": [] }
+        },
+        "web": {
+          "port": "{ports.web|int}",
+          "ip_address": "127.0.0.1",
+          "https": { "disabled": true },
+          "authentication": {
+            "disabled": false,
+            "username": "roadie",
+            "password": "{secrets.webPassword}",
+            "api_keys": {
+              "roadie": { "key": "{secrets.internalKey}", "role": "readwrite", "cidr": "127.0.0.1/32,::1/128" },
+              "$each": "consumers",
+              "key": "{item.id}",
+              "value": { "key": "{item.key}", "role": "readwrite", "cidr": "127.0.0.1/32,::1/128" }
+            }
+          }
+        },
+        "soulseek": {
+          "username": "{config.soulseekUsername}",
+          "password": "{secrets.soulseekPassword}",
+          "listen_port": "{ports.listen|int}"
+        }
+      }
+    }
+  ],
+
+  "run": {
+    "args": ["--app-dir", "{data}/app", "--config", "{data}/slskd.yml", "--no-logo"],
+    "env": {
+      "DOTNET_BUNDLE_EXTRACT_BASE_DIR": "{data}/extract",
+      "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+      "DOTNET_NOLOGO": "1"
+    },
+    "startupGraceSec": 30
+  },
+  "health": {
+    "request": {
+      "method": "GET",
+      "url": "{connection.url}/api/v0/application",
+      "headers": { "X-API-Key": "{secrets.internalKey}" },
+      "timeoutSec": 3
+    },
+    "unauthorizedStatus": [401, 403],
+    "extract": {
+      "version": "$.version.current",
+      "details.soulseekConnected": "$.server.isLoggedIn"
+    }
+  },
+  "busy": {
+    "requests": [
+      { "method": "GET", "url": "{connection.url}/api/v0/transfers/downloads", "headers": { "X-API-Key": "{secrets.internalKey}" } },
+      { "method": "GET", "url": "{connection.url}/api/v0/transfers/uploads", "headers": { "X-API-Key": "{secrets.internalKey}" } }
+    ],
+    "busyIf": { "path": "$..state", "regex": "^(Requested|Queued|Initializing|InProgress)" }
+  },
+  "stop": {
+    "graceSec": 15,
+    "api": [
+      { "method": "POST", "url": "{connection.url}/api/v0/session",
+        "json": { "username": "roadie", "password": "{secrets.webPassword}" },
+        "capture": { "token": "$.token" } },
+      { "method": "DELETE", "url": "{connection.url}/api/v0/application",
+        "headers": { "Authorization": "Bearer {token}" } }
+    ]
+  },
+  "startFailures": [
+    { "regex": "already running", "code": "standaloneRunning",
+      "message": "Another copy of slskd is running on this computer. Quit it, then try again." }
+  ]
+}
