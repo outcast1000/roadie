@@ -77,13 +77,21 @@ pub fn decide(id: &str, approve: bool, answers: Option<Map<String, Value>>) -> R
     }
     requests::set_status(id, requests::RequestStatus::Approved, None);
     let outcome = match r.kind.clone() {
-        requests::RequestKind::Install { tool, config, secrets, .. } => {
+        requests::RequestKind::Install { tool, consumer, config, secrets, .. } => {
             let recipe = store::get_trusted(&tool)?;
             let mut decisions = config;
             decisions.extend(secrets);
             decisions.extend(answers.unwrap_or_default());
             let mut progress = progress_reporter(tool.clone(), Some(id.to_string()));
             let out = install_with(&recipe, &decisions, &mut progress);
+            // The same click allowed the asking app to connect: grant its
+            // key now so it can read /connection as soon as we say "done".
+            if out.is_ok() {
+                if let Some(c) = consumer {
+                    consent::approve(&c, &recipe)?;
+                    let _ = tools::refresh_consumers(&recipe);
+                }
+            }
             events::tool_changed(&tool);
             out
         }
@@ -222,7 +230,7 @@ pub fn save_settings(settings: &Settings) -> Result<Settings, String> {
         if settings.run_in_background {
             tools::autostart::enable_service(root)?;
         } else {
-            tools::autostart::disable_service()?;
+            tools::autostart::disable_service(root)?;
         }
     }
     events::emit("settings-changed", serde_json::to_value(settings).unwrap_or_default());

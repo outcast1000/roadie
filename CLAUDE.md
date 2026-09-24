@@ -46,10 +46,13 @@ branding, no Viboplr-specific code paths; Viboplr is one registered consumer amo
 npm install --legacy-peer-deps          # npm 10.9's arborist trips on a peer set otherwise
 npm run tauri dev                       # window; it spawns `roadie --serve` (API on 127.0.0.1:47630; Vite on 1430)
 ./src-tauri/target/debug/roadie --serve # the service alone, headless (logs to <data>/logs/roadie-service.log)
+./src-tauri/target/debug/roadie tool status slskd        # CLI client (starts the service on demand); `roadie help`
+./src-tauri/target/debug/roadie tool install slskd --wait # asks, opens the window for approval, exits 0/1/2
 cd src-tauri && cargo test              # engine, validator, emitters, API router (tower oneshot)
 npm run test:mcp                        # node --test mcp/*.test.mjs
 npx vitest run && npx tsc --noEmit      # frontend
 cd src-tauri && cargo test --lib tools::probe -- --ignored --nocapture   # REAL install/start/stop of slskd (~60 MB download)
+npm run test:e2e                        # REAL end-to-end: src/e2e.rs (in-process service, approvals via owner channel) + tests/e2e_process.rs (real binary lifecycle)
 npm run tauri build -- --debug --bundles app   # a .app; the ONLY way to register the roadie:// scheme on macOS
 ```
 
@@ -64,7 +67,18 @@ npm run tauri build -- --debug --bundles app   # a .app; the ONLY way to registe
   `owner.sock` (the owner channel), `logs/roadie-service.log`.
 - The window replaces a service whose `buildId` (exe mtime+size) differs from its own, so a
   rebuilt dev binary never talks to a stale service. Settings → "Run in the background" off
-  makes the service exit a few seconds after the window disconnects (plain-app mode).
+  makes the service exit a few seconds after the window disconnects, or after 3 idle minutes
+  when no window ever connected (plain-app mode). A request that needs the user while no window
+  is connected makes the service open one (`service::open_window_if_needed`).
+- The service's login item is `com.outcast1000.roadie.service` for the default data dir and
+  `…service-<hash>` for any other, so a `--data-dir` sandbox never touches the real item. The
+  window accepts `--data-dir` too (the service passes it when opening a window for a sandbox).
+  `ROADIE_IDLE_EXIT_SECS` shortens the plain-app idle exit (tests use 4).
+- Tauri's single-instance plugin means one window per user: a second launch is forwarded to
+  the open window, so a window for another data dir cannot open while one is up.
+- Three clients speak to the service: the window (owner channel), the MCP server, and the CLI
+  (`roadie tool|request|service …`, `cli.rs`). The CLI never holds an owner token: it can ask,
+  never approve.
 - Driving the running app from a shell: read the token from `roadie-api.json` and curl
   `127.0.0.1:47630` — or speak MCP to `mcp/roadie-mcp.mjs` over stdio, as a client would.
 

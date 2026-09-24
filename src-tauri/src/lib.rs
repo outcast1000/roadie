@@ -14,6 +14,8 @@ pub mod cli;
 pub mod client;
 pub mod commands;
 pub mod consent;
+#[cfg(test)]
+mod e2e;
 pub mod events;
 pub mod mcp_setup;
 pub mod owner;
@@ -50,7 +52,10 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(commands::handler())
         .setup(move |app| {
-            let data_root = app.path().app_data_dir().map_err(|e| format!("app data dir: {e}"))?;
+            let data_root = match cli::data_dir_arg(&args) {
+                Some(d) => d,
+                None => app.path().app_data_dir().map_err(|e| format!("app data dir: {e}"))?,
+            };
             std::fs::create_dir_all(&data_root)?;
             paths::init(data_root.clone());
 

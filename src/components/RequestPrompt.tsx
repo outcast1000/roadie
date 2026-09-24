@@ -26,8 +26,12 @@ export function RequestPrompt({ request: r, tool, fields, recipe, dryRun, decidi
   let detail: string | null = null;
   switch (r.kind) {
     case "install":
-      title = `${r.requestedBy} asks to install ${name}`;
-      detail = tool ? tool.summary : null;
+      title = r.consumer ? `${r.requestedBy} asks to install ${name} and connect to it` : `${r.requestedBy} asks to install ${name}`;
+      detail = r.consumer
+        ? `${tool?.summary ?? ""} Approving also gives ${r.requestedBy} its own access key for ${name}, revocable any time from the tool's card.`.trim()
+        : tool
+          ? tool.summary
+          : null;
       break;
     case "uninstall":
       title = `${r.requestedBy} asks to remove ${name}`;

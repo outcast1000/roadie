@@ -42,8 +42,13 @@ Always loaded. The path-scoped files add detail; these apply everywhere.
   because pointers are the product for assistant authors.
 - API tests use `tower::ServiceExt::oneshot` against `build_router` with a fixed token and a
   temp data root — no network, no window.
-- Anything that talks to the real network or spawns a real tool is `#[ignore]` (`tools/probe.rs`)
-  with its recipe in the doc comment. Run it before claiming an install path works.
+- Anything that talks to the real network or spawns a real tool is `#[ignore]` (`tools/probe.rs`,
+  `src/e2e.rs`, `tests/e2e_process.rs`); `npm run test:e2e` runs them all. `src/e2e.rs` is the
+  client's view with approvals: the service in-process on a temp data dir, Viboplr over HTTP, the
+  user's clicks through the owner channel. `tests/e2e_process.rs` is the real binary from "Roadie
+  closed": CLI starts the service on demand, stop, idle exit in plain-app mode, a request opens a
+  window. Each uses its own `--data-dir` with background mode off, so the real installation and
+  login item are never touched. Extend them when a client-visible flow changes.
 - MCP: `node --test mcp/*.test.mjs` with a fake `fetch`; the server must never need Roadie
   running to pass its tests.
 - Frontend: vitest for pure helpers (`stateLabel`, formatters); `tsc --noEmit` must be clean.

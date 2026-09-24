@@ -20,6 +20,10 @@ pub enum RequestKind {
     /// and is never serialized — `secret_keys` says which were supplied.
     Install {
         tool: String,
+        /// A registered consumer that wants to connect once installed: one
+        /// approval covers the install *and* the grant.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        consumer: Option<String>,
         #[serde(skip_serializing_if = "Map::is_empty")]
         config: Map<String, Value>,
         #[serde(skip)]
@@ -73,7 +77,7 @@ pub struct Request {
 /// Build an install request, routing password fields out of the public
 /// `config` so a request can be listed without leaking them. The values
 /// must already have passed `state::validate_patch`.
-pub fn install_kind(recipe: &Recipe, values: Map<String, Value>) -> RequestKind {
+pub fn install_kind(recipe: &Recipe, values: Map<String, Value>, consumer: Option<String>) -> RequestKind {
     let mut config = Map::new();
     let mut secrets = Map::new();
     for (k, v) in values {
@@ -87,7 +91,7 @@ pub fn install_kind(recipe: &Recipe, values: Map<String, Value>) -> RequestKind 
         }
     }
     let secret_keys = secrets.keys().cloned().collect();
-    RequestKind::Install { tool: recipe.name.clone(), config, secrets, secret_keys }
+    RequestKind::Install { tool: recipe.name.clone(), consumer, config, secrets, secret_keys }
 }
 
 fn store() -> &'static Mutex<Vec<Request>> {
@@ -138,6 +142,18 @@ pub fn pending() -> Vec<Request> {
     store().lock().unwrap().iter().filter(|r| r.status == RequestStatus::Pending).cloned().collect()
 }
 
+/// Requests that still need something to happen: waiting for the user, or
+/// approved and running.
+pub fn live() -> Vec<Request> {
+    store()
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| matches!(r.status, RequestStatus::Pending | RequestStatus::Approved))
+        .cloned()
+        .collect()
+}
+
 pub fn set_status(id: &str, status: RequestStatus, error: Option<String>) -> Option<Request> {
     let updated = {
         let mut all = store().lock().unwrap();
@@ -169,7 +185,7 @@ mod tests {
 
     #[test]
     fn identical_pending_requests_collapse_and_status_moves() {
-        let install = || RequestKind::Install { tool: "t-collapse".into(), config: Map::new(), secrets: Map::new(), secret_keys: vec![] };
+        let install = || RequestKind::Install { tool: "t-collapse".into(), consumer: None, config: Map::new(), secrets: Map::new(), secret_keys: vec![] };
         let a = create(install(), "test");
         let b = create(install(), "test");
         assert_eq!(a.id, b.id);
@@ -190,7 +206,7 @@ mod tests {
         let mut values = Map::new();
         values.insert("soulseekUsername".into(), Value::String("bj".into()));
         values.insert("soulseekPassword".into(), Value::String("hunter2".into()));
-        let kind = install_kind(&recipe, values);
+        let kind = install_kind(&recipe, values, Some("viboplr".into()));
         let RequestKind::Install { config, secrets, secret_keys, .. } = &kind else { panic!() };
         assert_eq!(config["soulseekUsername"], "bj");
         assert_eq!(secrets["soulseekPassword"], "hunter2");
@@ -199,6 +215,7 @@ mod tests {
         let wire = serde_json::to_string(&r).unwrap();
         assert!(wire.contains("\"soulseekUsername\":\"bj\""), "{wire}");
         assert!(wire.contains("\"secretKeys\":[\"soulseekPassword\"]"), "{wire}");
+        assert!(wire.contains("\"consumer\":\"viboplr\""), "{wire}");
         assert!(!wire.contains("hunter2"), "secret leaked into the request wire shape: {wire}");
     }
 }

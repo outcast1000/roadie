@@ -830,8 +830,17 @@ pub fn uninstall(recipe: &Recipe, keep_data: bool) -> Result<(), String> {
         s.user_stopped = false;
         s.restart_pending = false;
         state::save(&p.data, &s)?;
-    } else if p.root.is_dir() {
-        std::fs::remove_dir_all(&p.root).map_err(|e| format!("remove {}: {e}", p.root.display()))?;
+    } else {
+        if p.root.is_dir() {
+            std::fs::remove_dir_all(&p.root).map_err(|e| format!("remove {}: {e}", p.root.display()))?;
+        }
+        // A clean slate includes the apps allowed to connect: a reinstall
+        // asks the user again before any app gets a key.
+        for c in consent::consumers_for(&recipe.name) {
+            if let Err(e) = consent::revoke(&c.id, Some(&recipe.name)) {
+                log::warn!("could not revoke {}'s grant for {}: {e}", c.id, recipe.name);
+            }
+        }
     }
     Ok(())
 }

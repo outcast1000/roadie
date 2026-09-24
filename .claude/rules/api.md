@@ -34,6 +34,9 @@ paths:
 - Handlers call `tools::*` / `store::*` under `spawn_blocking` (they do network and process I/O,
   and `reqwest::blocking` cannot be built inside the runtime) and end with `events::tool_changed`.
 - Callers identify themselves with `X-Roadie-Client`; it becomes `requestedBy` on prompts.
+- Every request except the `/v1/events` long-poll counts as activity (`service::touch`) for the
+  plain-app idle exit. A handler that needs the user calls `scheme::focus_if_possible`, which
+  also opens a window when none is connected.
 
 ## Requests (`requests.rs`)
 

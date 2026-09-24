@@ -35,23 +35,32 @@ pub fn label(name: &str) -> String {
     format!("{IDENTIFIER}.{name}")
 }
 
-/// The item name for the service itself (`com.outcast1000.roadie.service`).
-pub const SERVICE_ITEM: &str = "service";
+/// The item name for the service: `service` for the default data dir
+/// (`com.outcast1000.roadie.service`), `service-<hash>` for any other, so a
+/// service on a test or secondary data dir never touches the real item.
+pub fn service_item(data_root: &Path) -> String {
+    if data_root == crate::paths::default_data_root() {
+        return "service".into();
+    }
+    use sha2::{Digest, Sha256};
+    let h = Sha256::digest(data_root.to_string_lossy().as_bytes());
+    format!("service-{:08x}", u32::from_be_bytes(h[..4].try_into().unwrap()))
+}
 
 /// Register (or rewrite, after the app moved) the service's login item.
 pub fn enable_service(data_root: &Path) -> Result<(), String> {
     let exe = launcher_exe()?;
     let args = crate::service::service_args(data_root);
     let log = data_root.join("logs").join(crate::service::SERVICE_LOG);
-    enable_with(SERVICE_ITEM, "Roadie", &exe, &args, &log)
+    enable_with(&service_item(data_root), "Roadie", &exe, &args, &log)
 }
 
-pub fn disable_service() -> Result<(), String> {
-    disable(SERVICE_ITEM)
+pub fn disable_service(data_root: &Path) -> Result<(), String> {
+    disable(&service_item(data_root))
 }
 
-pub fn service_enabled() -> bool {
-    is_enabled(SERVICE_ITEM)
+pub fn service_enabled(data_root: &Path) -> bool {
+    is_enabled(&service_item(data_root))
 }
 
 pub fn is_enabled(name: &str) -> bool {

@@ -185,7 +185,7 @@ pub async fn app_info(app: AppHandle) -> Result<AppInfo, String> {
             version: c.service_version,
             pid: c.service_pid,
             owner_channel: c.owner_token.is_some(),
-            login_item: crate::tools::autostart::service_enabled(),
+            login_item: crate::tools::autostart::service_enabled(&data_dir),
         }),
     })
 }
@@ -204,7 +204,7 @@ pub async fn service_reconnect() -> Result<AppInfo, String> {
             data_dir: root.to_string_lossy().into_owned(),
             api_port: conn.as_ref().map(|c| c.port),
             platform: recipe::Platform::current().key(),
-            service: conn.map(|c| ServiceInfo { version: c.service_version, pid: c.service_pid, owner_channel: c.owner_token.is_some(), login_item: crate::tools::autostart::service_enabled() }),
+            service: conn.map(|c| ServiceInfo { version: c.service_version, pid: c.service_pid, owner_channel: c.owner_token.is_some(), login_item: crate::tools::autostart::service_enabled(&root) }),
         })
     })
 }

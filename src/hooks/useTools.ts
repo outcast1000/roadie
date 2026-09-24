@@ -56,7 +56,17 @@ export function useTools(): ToolsHook {
   useEffect(() => {
     void refresh();
     const unlisten: Array<() => void> = [];
-    void listen<{ name: string }>("tool-status-changed", () => {
+    void listen<{ name: string }>("tool-status-changed", (ev) => {
+      // A status change ends any install progress we were showing for that
+      // tool — installs approved from a request never go through `run`, so
+      // nothing else would clear their bar.
+      setInstalling((prev) => {
+        if (ev.payload?.name === "*") return {};
+        if (!ev.payload?.name || !(ev.payload.name in prev)) return prev;
+        const next = { ...prev };
+        delete next[ev.payload.name];
+        return next;
+      });
       // Coalesce bursts (a start emits several) into one list read.
       if (refreshTimer.current) window.clearTimeout(refreshTimer.current);
       refreshTimer.current = window.setTimeout(() => void refresh(), 150);

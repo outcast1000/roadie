@@ -41,6 +41,24 @@ rqbit, cloudflared.
   window. Full route list in `src-tauri/src/api/mod.rs`.
 - **MCP:** a dependency-free stdio server ships in the bundle — see [`mcp/README.md`](mcp/README.md).
   Settings → MCP copies a ready client config.
+- **CLI:** the same binary is a client. It starts the background service if none answers, prints
+  one JSON document, and never approves anything itself:
+
+  ```bash
+  roadie tool status slskd                      # installed? running? (no service needed to be up)
+  roadie tool start slskd
+  roadie tool install slskd --set soulseekUsername=bj --consumer viboplr --wait
+                                                # opens Roadie for your approval; one click installs
+                                                #   and grants viboplr its key;
+                                                #   exit 0 done · 1 failed · 2 you declined · 3 error
+  roadie request <id> --wait                    # follow a request created earlier
+  roadie --as "My Player" tool install slskd    # the prompt names your app, not "roadie CLI"
+  roadie service status|stop
+  ```
+
+  On macOS the binary is `Roadie.app/Contents/MacOS/roadie`. Nothing needs to be running
+  beforehand: with "Run in the background" off, the service the CLI starts exits again after a few
+  idle minutes.
 
 ## Recipes
 

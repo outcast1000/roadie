@@ -126,10 +126,11 @@ pub fn handle(app: &tauri::AppHandle, url: &str) {
     focus_window(app);
 }
 
-/// Bring the window forward from code that has no `AppHandle` (API
-/// handlers) — the emitter side reacts to this event.
+/// Something needs the user: bring a connected window forward, or open one
+/// when none is connected (the service runs headless).
 pub fn focus_if_possible() {
     events::emit("focus-request", serde_json::Value::Null);
+    crate::service::open_window_if_needed();
 }
 
 pub fn focus_window(app: &tauri::AppHandle) {

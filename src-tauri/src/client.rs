@@ -20,6 +20,21 @@ pub struct Connection {
 
 static CONN: OnceLock<RwLock<Option<Connection>>> = OnceLock::new();
 static DATA_ROOT: OnceLock<PathBuf> = OnceLock::new();
+static CLIENT_NAME: OnceLock<RwLock<String>> = OnceLock::new();
+
+/// What this process calls itself in `X-Roadie-Client` (shown to the user
+/// as "… asks to install"). The window is "Roadie window"; the CLI defaults
+/// to "roadie CLI" and `--as <name>` lets a script name the real app.
+pub fn set_client_name(name: &str) {
+    let n = name.trim().chars().take(60).collect::<String>();
+    if !n.is_empty() {
+        *CLIENT_NAME.get_or_init(|| RwLock::new(String::new())).write().unwrap() = n;
+    }
+}
+
+fn client_name() -> String {
+    CLIENT_NAME.get_or_init(|| RwLock::new("Roadie window".into())).read().unwrap().clone()
+}
 
 fn slot() -> &'static RwLock<Option<Connection>> {
     CONN.get_or_init(|| RwLock::new(None))
@@ -32,17 +47,28 @@ pub fn current() -> Option<Connection> {
 /// Bring the service up (or replace a stale build), read the token, open
 /// the owner channel. Idempotent; call again to reconnect.
 pub fn connect(data_root: &Path) -> Result<Connection, String> {
+    connect_with(data_root, true)
+}
+
+/// `owner = false` is for the CLI: a bearer client like any other, which
+/// must not count as a window (it would keep the service alive and stop it
+/// from opening the real window for a prompt).
+pub fn connect_with(data_root: &Path, owner: bool) -> Result<Connection, String> {
     let _ = DATA_ROOT.set(data_root.to_path_buf());
     let port = service::ensure_running(data_root)?;
     let disc: Value = serde_json::from_str(&std::fs::read_to_string(api::discovery_path(data_root)).map_err(|e| format!("read discovery file: {e}"))?)
         .map_err(|e| format!("discovery file: {e}"))?;
     let token = disc.get("token").and_then(|t| t.as_str()).ok_or("discovery file has no token")?.to_string();
     let health = api::probe(data_root).ok_or("service stopped answering")?;
-    let owner_token = match owner::connect(data_root) {
-        Ok(t) => Some(t),
-        Err(e) => {
-            log::error!("owner channel: {e} — approvals will be unavailable");
-            None
+    let owner_token = if !owner {
+        None
+    } else {
+        match owner::connect(data_root) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                log::error!("owner channel: {e} — approvals will be unavailable");
+                None
+            }
         }
     };
     let conn = Connection {
@@ -66,7 +92,7 @@ pub fn call(method: &str, path: &str, body: Option<Value>, owner: bool) -> Resul
     let conn = current().ok_or("not connected to the Roadie service")?;
     let url = format!("http://127.0.0.1:{}{}", conn.port, path);
     let m: reqwest::Method = method.parse().map_err(|_| format!("bad method {method}"))?;
-    let mut req = http()?.request(m, &url).bearer_auth(&conn.token).header("X-Roadie-Client", "Roadie window");
+    let mut req = http()?.request(m, &url).bearer_auth(&conn.token).header("X-Roadie-Client", client_name());
     if owner {
         let t = conn.owner_token.as_deref().ok_or("the window is not connected to the owner channel; approvals are unavailable")?;
         req = req.header(owner::HEADER, t);

@@ -8,11 +8,11 @@
 //! answers, replaces it when the binary changed (`buildId`), connects to the
 //! owner channel, and mirrors the event log into the webview.
 
-use crate::{actions, api, events, owner, paths, recipe, tools};
+use crate::{actions, api, events, owner, paths, recipe, requests, tools};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 pub const SERVICE_LOG: &str = "roadie-service.log";
 
@@ -21,6 +21,70 @@ static STOPPING: AtomicBool = AtomicBool::new(false);
 
 fn shutdown_signal() -> &'static tokio::sync::Notify {
     SHUTDOWN.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Idle exit, plain-app mode: with "run in the background" off, the service
+/// leaves after this long without a window, an API call or a live request.
+/// `ROADIE_IDLE_EXIT_SECS` overrides it (tests use a few seconds).
+pub fn idle_exit() -> Duration {
+    std::env::var("ROADIE_IDLE_EXIT_SECS").ok().and_then(|s| s.parse().ok()).map(Duration::from_secs).unwrap_or(Duration::from_secs(3 * 60))
+}
+
+static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
+
+/// Every API request calls this; the idle timer counts from the last one.
+pub fn touch() {
+    LAST_ACTIVITY.store(paths::now_secs(), Ordering::Relaxed);
+}
+
+fn idle_for() -> Duration {
+    Duration::from_secs(paths::now_secs().saturating_sub(LAST_ACTIVITY.load(Ordering::Relaxed)))
+}
+
+/// A request or a deep link needs the user and no window is connected:
+/// open one. Debounced so a burst of requests spawns one window.
+pub fn open_window_if_needed() {
+    if owner::owners_connected() > 0 {
+        return;
+    }
+    static LAST_OPEN: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    let mut last = LAST_OPEN.get_or_init(|| Mutex::new(None)).lock().unwrap();
+    if last.is_some_and(|t| t.elapsed() < Duration::from_secs(15)) {
+        return;
+    }
+    *last = Some(Instant::now());
+    match open_window() {
+        Ok(()) => log::info!("opened the window for a pending request"),
+        Err(e) => log::warn!("could not open the window: {e}"),
+    }
+}
+
+/// Launch the window process. Inside a macOS bundle, hand the bundle to
+/// `open` so LaunchServices treats it as the app; elsewhere run the
+/// executable with no arguments (that *is* the window).
+pub fn open_window() -> Result<(), String> {
+    let exe = tools::autostart::launcher_exe()?;
+    let root = paths::data_root()?;
+    // A window on a non-default data dir must be told so, or it would
+    // connect to the default service instead of this one.
+    let args: Vec<String> = if root == paths::default_data_root() { vec![] } else { vec!["--data-dir".into(), root.to_string_lossy().into_owned()] };
+    #[cfg(target_os = "macos")]
+    {
+        let s = exe.to_string_lossy();
+        if let Some(i) = s.find(".app/Contents/MacOS/") {
+            let bundle = &s[..i + 4];
+            let mut cmd = std::process::Command::new("/usr/bin/open");
+            cmd.arg(bundle);
+            if !args.is_empty() {
+                cmd.arg("--args").args(&args);
+            }
+            let ok = cmd.status().map_err(|e| format!("open {bundle}: {e}"))?.success();
+            return if ok { Ok(()) } else { Err(format!("open {bundle} failed")) };
+        }
+    }
+    let logs = root.join("logs");
+    let plan = tools::process::SpawnPlan { exe, args, env: Default::default(), cwd: None, log: logs.join("roadie-window.log"), append_log: true };
+    tools::process::spawn_detached(&plan).map(|_| ())
 }
 
 /// Owner route: stop the service (the window does this before starting a
@@ -96,7 +160,7 @@ pub fn run(data_root: PathBuf) -> i32 {
                 log::warn!("could not register the login item: {e}");
             }
         } else {
-            let _ = tools::autostart::disable_service();
+            let _ = tools::autostart::disable_service(&data_root);
         }
         // Plain-app mode: when the last window disconnects and the setting
         // is off, leave after a short grace (a relaunching window reconnects
@@ -111,6 +175,7 @@ pub fn run(data_root: PathBuf) -> i32 {
             });
         });
 
+        touch();
         // Reconcile shortly after launch, then the daily update pass.
         std::thread::Builder::new()
             .name("reconcile".into())
@@ -131,6 +196,27 @@ pub fn run(data_root: PathBuf) -> i32 {
                             return;
                         }
                     }
+                }
+            })
+            .ok();
+        // Plain-app mode, no window ever opened (a CLI or MCP client started
+        // us): leave once nothing has happened for a while and no request
+        // is pending or running.
+        std::thread::Builder::new()
+            .name("idle-exit".into())
+            .spawn(|| loop {
+                std::thread::sleep(Duration::from_secs(15).min(idle_exit() / 2).max(Duration::from_secs(1)));
+                if STOPPING.load(Ordering::SeqCst) {
+                    return;
+                }
+                if actions::load_settings().run_in_background || owner::owners_connected() > 0 {
+                    continue;
+                }
+                let live = requests::live().len();
+                if live == 0 && idle_for() >= idle_exit() {
+                    log::info!("idle for {}s with no window and background mode off; stopping", idle_for().as_secs());
+                    request_shutdown();
+                    return;
                 }
             })
             .ok();

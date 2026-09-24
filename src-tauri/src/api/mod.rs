@@ -248,6 +248,10 @@ async fn host_and_method_guard(req: Request, next: Next) -> Response {
     if !host_ok {
         return err(StatusCode::BAD_REQUEST, "Host must be 127.0.0.1 or localhost");
     }
+    // The event long-poll is the window idling, not activity.
+    if !req.uri().path().ends_with("/v1/events") {
+        service::touch();
+    }
     next.run(req).await
 }
 
@@ -351,6 +355,8 @@ async fn get_connection(State(state): State<ApiState>, AxumPath(name): AxumPath<
                 return Err("bad consumer id".to_string());
             }
             match consent::grant(&id, &recipe.name) {
+                // Approved, but nothing to connect to: no key until installed.
+                Some(_) if !st.installed => Err("not-installed".to_string()),
                 Some(g) => Ok(json!({ "url": url, "apiKey": if g.key.is_empty() { Value::Null } else { Value::String(g.key) }, "policy": policy, "running": st.running, "healthy": st.healthy })),
                 None => {
                     // Unknown consumer ids are not auto-registered: a name is
@@ -364,6 +370,9 @@ async fn get_connection(State(state): State<ApiState>, AxumPath(name): AxumPath<
                 }
             }
         } else if bearer_ok {
+            if !st.installed {
+                return Err("not-installed".to_string());
+            }
             let p = paths::tool_paths(&recipe.name)?;
             let s = tools::state::load(&p.data);
             let key = s.secrets.get("internalKey").cloned();
@@ -378,6 +387,7 @@ async fn get_connection(State(state): State<ApiState>, AxumPath(name): AxumPath<
         Err(e) if e == "consent-required" => err_with(StatusCode::FORBIDDEN, "the user has not approved this consumer for this tool yet — ask them to approve it in Roadie", json!({ "reason": "consent-required" })),
         Err(e) if e == "unknown-consumer" => err_with(StatusCode::FORBIDDEN, "unknown consumer; register it via POST /v1/consumers (bearer) first", json!({ "reason": "unknown-consumer" })),
         Err(e) if e == "consumer-required" => err(StatusCode::UNAUTHORIZED, "pass ?consumer=<id> or a bearer token"),
+        Err(e) if e == "not-installed" => err_with(StatusCode::CONFLICT, "the tool is not installed; ask to install it first", json!({ "reason": "not-installed" })),
         Err(e) => err(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -552,14 +562,33 @@ async fn install_tool(AxumPath(name): AxumPath<String>, req: Request) -> Respons
         Ok(b) => b,
         Err(e) => return err(StatusCode::BAD_REQUEST, e.to_string()),
     };
-    let values: Map<String, Value> = if body.is_empty() {
-        Map::new()
+    let (values, consumer): (Map<String, Value>, Option<String>) = if body.is_empty() {
+        (Map::new(), None)
     } else {
         match serde_json::from_slice::<Value>(&body) {
-            Ok(Value::Object(m)) => m.get("config").and_then(|c| c.as_object()).cloned().unwrap_or(m),
-            _ => return err(StatusCode::BAD_REQUEST, "body must be a JSON object: { \"config\": { \"<key>\": <value> } }"),
+            Ok(Value::Object(m)) => {
+                let consumer = m.get("consumer").and_then(|c| c.as_str()).map(str::to_string);
+                let values = match m.get("config").and_then(|c| c.as_object()) {
+                    Some(c) => c.clone(),
+                    None => {
+                        let mut bare = m.clone();
+                        bare.remove("consumer");
+                        bare
+                    }
+                };
+                (values, consumer)
+            }
+            _ => return err(StatusCode::BAD_REQUEST, "body must be a JSON object: { \"config\": { \"<key>\": <value> }, \"consumer\": \"<id>\" }"),
         }
     };
+    if let Some(c) = &consumer {
+        if consent::get(c).is_none() {
+            return err(StatusCode::BAD_REQUEST, format!("unknown consumer `{c}`; register it with POST /v1/consumers first"));
+        }
+        if recipe.connection.as_ref().map(|c| c.policy).unwrap_or(recipe::ConnectionPolicy::None) == recipe::ConnectionPolicy::None {
+            return err(StatusCode::BAD_REQUEST, format!("{} exposes no connection; drop `consumer`", recipe.display_name));
+        }
+    }
     let mut config_only = values.clone();
     if let Err(e) = tools::install_options(&recipe, &mut config_only) {
         return err(StatusCode::UNPROCESSABLE_ENTITY, format!("config: {e}"));
@@ -589,13 +618,13 @@ async fn install_tool(AxumPath(name): AxumPath<String>, req: Request) -> Respons
             }));
         }
     }
-    let r = requests::create(requests::install_kind(&recipe, values), &by);
+    let r = requests::create(requests::install_kind(&recipe, values, consumer), &by);
     crate::scheme::focus_if_possible();
     (
         StatusCode::ACCEPTED,
         Json(json!({
             "requestId": r.id, "status": r.status, "decisions": decisions,
-            "hint": "the user must approve this in Roadie and can change or fill in any decision there; poll GET /v1/requests/{id}"
+            "hint": "the user must approve this in Roadie and can change or fill in any decision there; poll GET /v1/requests/{id}. With `consumer`, approval also grants that app its connection key."
         })),
     )
         .into_response()
@@ -989,6 +1018,18 @@ mod tests {
         let v = json_of(resp).await;
         assert!(v["decisions"].as_array().unwrap().iter().any(|d| d["key"] == "startNow" && d["value"] == false), "{v}");
         requests::set_status(v["requestId"].as_str().unwrap(), requests::RequestStatus::Declined, None);
+
+        // One approval for install + connect: the consumer rides along.
+        let resp = app.clone().oneshot(req("POST", "/v1/tools/slskd/install", Some(TOKEN), Some(r#"{"consumer":"viboplr"}"#))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let id = json_of(resp).await["requestId"].as_str().unwrap().to_string();
+        let r = json_of(app.clone().oneshot(req("GET", &format!("/v1/requests/{id}"), Some(TOKEN), None)).await.unwrap()).await;
+        assert_eq!(r["consumer"], "viboplr");
+        requests::set_status(&id, requests::RequestStatus::Declined, None);
+        let resp = app.clone().oneshot(req("POST", "/v1/tools/slskd/install", Some(TOKEN), Some(r#"{"consumer":"stranger"}"#))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "a name is not a credential");
+        let resp = app.clone().oneshot(req("POST", "/v1/tools/yt-dlp/install", Some(TOKEN), Some(r#"{"consumer":"viboplr"}"#))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "a cli tool has no connection to grant");
         let resp = app.clone().oneshot(req("POST", "/v1/tools/yt-dlp/install", Some(TOKEN), Some(r#"{"config":{"autostart":true}}"#))).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "a cli tool offers no autostart");
     }
@@ -999,6 +1040,15 @@ mod tests {
         let resp = app.clone().oneshot(req("GET", "/v1/tools/slskd/connection?consumer=viboplr", None, None)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(json_of(resp).await["reason"], "consent-required");
+        // Approved but not installed in the test root: no key for anyone.
+        let recipe = store::get_trusted("slskd").unwrap();
+        consent::approve("viboplr", &recipe).unwrap();
+        let resp = app.clone().oneshot(req("GET", "/v1/tools/slskd/connection?consumer=viboplr", None, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(json_of(resp).await["reason"], "not-installed");
+        let resp = app.clone().oneshot(req("GET", "/v1/tools/slskd/connection", Some(TOKEN), None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "the internal key is not handed out either");
+        consent::revoke("viboplr", Some("slskd")).unwrap();
         let resp = app.clone().oneshot(req("GET", "/v1/tools/slskd/connection?consumer=stranger", None, None)).await.unwrap();
         assert_eq!(json_of(resp).await["reason"], "unknown-consumer");
         let resp = app.clone().oneshot(req("GET", "/v1/tools/slskd/connection", None, None)).await.unwrap();

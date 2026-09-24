@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:rust": "cd src-tauri && cargo test",
     "test:mcp": "node --test mcp/*.test.mjs",
+    "test:e2e": "cd src-tauri && cargo build && cargo test --lib e2e -- --ignored --nocapture && cargo test --test e2e_process -- --ignored --nocapture --test-threads=1",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -94,6 +94,11 @@ asks the user for anything still missing, and the user can change any of it befo
 Secret (password) fields may be passed the same way; they are stored 0600 and never echoed
 back by `GET /v1/requests/<id>`.
 
+An install request may also name a registered `consumer`
+(`{ "config": {…}, "consumer": "<id>" }`): the one approval then installs the tool *and* grants
+that app its connection key, so it can read `/v1/tools/<name>/connection?consumer=<id>` as soon as
+the request is `done`. Only for tools with a `connection`; the consumer must already be registered.
+
 Two decisions belong to the engine rather than to a config field, and use reserved keys in the
 same `config` object: `startNow` (start the daemon as soon as it is installed) and `autostart`
 (start it at login). A recipe offers them with `startAfterInstall` / `autostart` at the top
