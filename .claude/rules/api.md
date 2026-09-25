@@ -46,6 +46,9 @@ paths:
 
 ## Requests (`requests.rs`)
 
+What an ask means lives in `intake.rs`, shared with the CLI release: handlers parse HTTP, call
+`intake::{install, update, uninstall, consumer_connection}`, and map a `Refusal` to a status.
+
 `POST /v1/tools/{name}/install` and `/update` accept `{"recipe": …}` (the app's own recipe; must
 be valid, 422 with pointers, and named like the URL, 400). Identical to the trusted recipe: an
 ordinary install/update. Otherwise install queues an Install request carrying it, and update on

@@ -49,6 +49,10 @@ Always loaded. The path-scoped files add detail; these apply everywhere.
   closed": CLI starts the service on demand, stop, idle exit in plain-app mode, a request opens a
   window. Each uses its own `--data-dir` with background mode off, so the real installation and
   login item are never touched. Extend them when a client-visible flow changes.
+- Both releases: `cargo test` (desktop) and `cargo test --no-default-features --target-dir
+  target/cli` (CLI) must pass. Code for one release only sits behind `#[cfg(feature =
+  "service")]` or `"window"`. `cli/local.rs` tests answer the dialog for the user
+  (`tests::NEXT`) and use recipes for another platform, so approving never downloads.
 - MCP: `node --test mcp/*.test.mjs` with a fake `fetch`; the server must never need Roadie
   running to pass its tests.
 - Frontend: vitest for pure helpers (`stateLabel`, formatters); `tsc --noEmit` must be clean.

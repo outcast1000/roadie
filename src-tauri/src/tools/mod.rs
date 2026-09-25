@@ -26,7 +26,7 @@ use serde_json::{Map, Value};
 use state::ToolState;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub fn latest_cache() -> &'static LatestCache {
@@ -34,9 +34,26 @@ pub fn latest_cache() -> &'static LatestCache {
     C.get_or_init(LatestCache::default)
 }
 
-fn lock(name: &str) -> Arc<Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
-    LOCKS.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().entry(name.to_string()).or_default().clone()
+/// Held around every change to a tool: an in-process mutex (the threads of
+/// one service) and a file lock in `<data>/locks/` (separate processes: two
+/// CLI runs, or one and a `maintain` at login). A lock file that cannot be
+/// taken is logged and the change goes ahead under the mutex alone. Fields
+/// drop in order, so the file lock is released before the mutex.
+struct ToolLock {
+    _file: Option<paths::FileLock>,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+fn lock(name: &str) -> ToolLock {
+    static LOCKS: OnceLock<Mutex<HashMap<String, &'static Mutex<()>>>> = OnceLock::new();
+    let m: &'static Mutex<()> = LOCKS.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().entry(name.to_string()).or_insert_with(|| Box::leak(Box::new(Mutex::new(()))));
+    let guard = m.lock().unwrap_or_else(|e| e.into_inner());
+    let file = paths::data_root().ok().and_then(|root| {
+        paths::lock_file(&root.join("locks").join(format!("{name}.lock")))
+            .map_err(|e| log::warn!("{e}; relying on the in-process lock"))
+            .ok()
+    });
+    ToolLock { _file: file, _guard: guard }
 }
 
 /// Conflict / failure recorded by the last start attempt, shown until the
@@ -504,8 +521,7 @@ pub type Progress<'a> = &'a mut dyn FnMut(install::Phase, u64, Option<u64>);
 /// Install (nothing current) or fetch-and-stage the latest release. Applies
 /// immediately when the daemon is stopped or idle; otherwise stays staged.
 pub fn install(recipe: &Recipe, progress: Progress) -> Result<ToolStatus, String> {
-    let guard = lock(&recipe.name);
-    let _g = guard.lock().unwrap();
+    let _g = lock(&recipe.name);
     let platform = Platform::current();
     if !recipe.supported_on(&platform) {
         return Err(format!("{} has no build for this computer", recipe.display_name));
@@ -599,8 +615,7 @@ pub fn start(recipe: &Recipe, started_by: &str) -> Result<ToolStatus, String> {
     if recipe.kind != Kind::Daemon {
         return Err(format!("{} is a command-line tool; there is nothing to start", recipe.display_name));
     }
-    let guard = lock(&recipe.name);
-    let _g = guard.lock().unwrap();
+    let _g = lock(&recipe.name);
     let p = paths::tool_paths(&recipe.name)?;
     let mut st = state::load_or_init(recipe, &p.data, &Platform::current())?;
     let ctx = build_ctx(recipe, &st, &p)?;
@@ -697,8 +712,7 @@ fn stop_process(recipe: &Recipe, ctx: &Ctx, pid: Option<u32>) -> Result<process:
 }
 
 pub fn stop(recipe: &Recipe) -> Result<ToolStatus, String> {
-    let guard = lock(&recipe.name);
-    let _g = guard.lock().unwrap();
+    let _g = lock(&recipe.name);
     let p = paths::tool_paths(&recipe.name)?;
     let mut st = state::load(&p.data);
     let ctx = build_ctx(recipe, &st, &p)?;
@@ -752,8 +766,7 @@ pub fn set_autostart(recipe: &Recipe, enabled: bool) -> Result<ToolStatus, Strin
     if recipe.kind != Kind::Daemon {
         return Err("only daemons start at login".into());
     }
-    let guard = lock(&recipe.name);
-    let _g = guard.lock().unwrap();
+    let _g = lock(&recipe.name);
     let p = paths::tool_paths(&recipe.name)?;
     let mut st = state::load_or_init(recipe, &p.data, &Platform::current())?;
     // "Start at login" is a flag the service acts on at its own start; a
@@ -774,8 +787,7 @@ pub fn set_autostart(recipe: &Recipe, enabled: bool) -> Result<ToolStatus, Strin
 /// Apply a config patch; rewrite the files; restart a running daemon when it
 /// is idle, otherwise mark the restart pending.
 pub fn configure(recipe: &Recipe, patch: &Map<String, Value>) -> Result<ToolStatus, String> {
-    let guard = lock(&recipe.name);
-    let _g = guard.lock().unwrap();
+    let _g = lock(&recipe.name);
     let p = paths::tool_paths(&recipe.name)?;
     std::fs::create_dir_all(&p.data).map_err(|e| format!("create {}: {e}", p.data.display()))?;
     let mut st = state::load_or_init(recipe, &p.data, &Platform::current())?;
@@ -804,8 +816,7 @@ pub fn refresh_consumers(recipe: &Recipe) -> Result<ToolStatus, String> {
 /// Stop, drop the login item, delete the versions and (unless `keep_data`)
 /// the data dir. User folders named by config are never touched.
 pub fn uninstall(recipe: &Recipe, keep_data: bool) -> Result<(), String> {
-    let guard = lock(&recipe.name);
-    let _g = guard.lock().unwrap();
+    let _g = lock(&recipe.name);
     let p = paths::tool_paths(&recipe.name)?;
     let st = state::load(&p.data);
     if recipe.kind == Kind::Daemon && install::current_version(recipe, &p).is_some() {
@@ -936,6 +947,12 @@ pub fn dry_run(recipe: &Recipe) -> Result<DryRun, String> {
 /// per-tool login items left by an older Roadie, apply what was staged
 /// while stopped.
 pub fn reconcile(recipes: &[Recipe], emit: &dyn Fn(&str, Value)) {
+    reconcile_with(recipes, emit, true)
+}
+
+/// `at_login` false (the CLI's `maintain` run by an app, not at login): a
+/// daemon the user stopped stays stopped.
+pub fn reconcile_with(recipes: &[Recipe], emit: &dyn Fn(&str, Value), at_login: bool) {
     for recipe in recipes.iter().filter(|r| r.kind == Kind::Daemon) {
         let Ok(p) = paths::tool_paths(&recipe.name) else { continue };
         if install::current_version(recipe, &p).is_none() && install::staged_upgrade(recipe, &p).is_none() {
@@ -954,13 +971,12 @@ pub fn reconcile(recipes: &[Recipe], emit: &dyn Fn(&str, Value)) {
             }
         }
         if !lv.running && lv.conflict.is_none() {
-            if st.autostart {
+            if st.autostart && (at_login || !st.user_stopped) {
                 // Service start is the tools' login: a Stop from the previous
                 // session does not carry over, exactly as a login item would
                 // have started it.
                 if st.user_stopped {
-                    let guard = lock(&recipe.name);
-                    let _g = guard.lock().unwrap();
+                    let _g = lock(&recipe.name);
                     let mut s = state::load(&p.data);
                     s.user_stopped = false;
                     let _ = state::save(&p.data, &s);
@@ -969,8 +985,7 @@ pub fn reconcile(recipes: &[Recipe], emit: &dyn Fn(&str, Value)) {
                     log::warn!("autostart of {} failed: {e}", recipe.name);
                 }
             } else {
-                let guard = lock(&recipe.name);
-                let _g = guard.lock().unwrap();
+                let _g = lock(&recipe.name);
                 let mut s = st.clone();
                 if let Err(e) = apply_pending(recipe, &mut s, &p, false) {
                     log::warn!("could not apply staged {}: {e}", recipe.name);
@@ -996,8 +1011,7 @@ pub fn auto_update(recipes: &[Recipe], emit: &dyn Fn(&str, Value)) {
                 continue;
             }
         };
-        let guard = lock(&recipe.name);
-        let _g = guard.lock().unwrap();
+        let _g = lock(&recipe.name);
         let mut st = state::load(&p.data);
         let newer = if resolved.floating {
             false // floating sources are refreshed only on explicit Update

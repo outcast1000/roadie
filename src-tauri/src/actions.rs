@@ -254,7 +254,9 @@ pub fn load_settings() -> Settings {
 pub fn save_settings(settings: &Settings) -> Result<Settings, String> {
     let p = settings_path().ok_or("data root not initialized")?;
     paths::write_atomic(&p, serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?.as_bytes(), false)?;
-    // The login item follows the setting right away.
+    // The login item follows the setting right away (desktop release; the
+    // CLI's item follows its tools' "start at login" instead).
+    #[cfg(feature = "service")]
     if let Ok(root) = paths::data_root() {
         if settings.run_in_background {
             tools::autostart::enable_service(root)?;

@@ -41,15 +41,14 @@ fn idle_for() -> Duration {
     Duration::from_secs(paths::now_secs().saturating_sub(LAST_ACTIVITY.load(Ordering::Relaxed)))
 }
 
-/// A request needs the user: show it on this machine's approval surface
-/// (`prompt.rs`). The window build opens its window; the build without one
-/// shows a native dialog; with no screen at all the request waits for
-/// `roadie request <id> answer` in a terminal.
+/// A request needs the user: open or focus the window, or, with no screen
+/// at all, leave it for `roadie request <id> answer` in a terminal.
 pub fn ask_user() {
     match crate::prompt::surface() {
         crate::prompt::Surface::Window => open_window_if_needed(),
-        crate::prompt::Surface::Dialog => crate::prompt::ask_pending(),
-        crate::prompt::Surface::Terminal => {
+        // The service ships with its window, so a screen means Window;
+        // Dialog is the CLI release's surface.
+        crate::prompt::Surface::Dialog | crate::prompt::Surface::Terminal => {
             for r in requests::pending() {
                 log::info!("request {} waits for an answer; no screen here, so run `roadie request {} answer` in a terminal", r.id, r.id);
             }

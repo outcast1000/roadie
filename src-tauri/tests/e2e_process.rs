@@ -11,6 +11,9 @@
 //! cd src-tauri && cargo build && cargo test --test e2e_process -- --ignored --nocapture --test-threads=1
 //! ```
 
+// The desktop release's service lifecycle; the CLI release has no service.
+#![cfg(feature = "service")]
+
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;

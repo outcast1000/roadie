@@ -14,6 +14,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
+#[cfg(feature = "service")]
 use std::time::Duration;
 
 pub const CAPACITY: usize = 512;
@@ -40,6 +41,7 @@ fn log() -> &'static Mutex<Log> {
     L.get_or_init(|| Mutex::new(Log { next_seq: 1, events: VecDeque::with_capacity(CAPACITY) }))
 }
 
+#[cfg(feature = "service")]
 fn notify() -> &'static tokio::sync::Notify {
     static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
     N.get_or_init(tokio::sync::Notify::new)
@@ -59,6 +61,7 @@ pub fn emit(name: &str, payload: Value) {
         }
         l.events.push_back(Event { seq, name: name.to_string(), payload: payload.clone() });
     }
+    #[cfg(feature = "service")]
     notify().notify_waiters();
     if let Some(f) = EMITTER.get() {
         f(name, payload);
@@ -82,6 +85,7 @@ pub fn since(since: u64) -> Vec<Event> {
 /// Long-poll: return as soon as there is anything after `since`, or an empty
 /// list when `timeout` passes. Registers for the notification *before*
 /// checking the log so an emit between the two is never missed.
+#[cfg(feature = "service")]
 pub async fn wait_since(since_seq: u64, timeout: Duration) -> Vec<Event> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -98,7 +102,7 @@ pub async fn wait_since(since_seq: u64, timeout: Duration) -> Vec<Event> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "service"))]
 mod tests {
     use super::*;
 

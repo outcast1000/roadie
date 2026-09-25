@@ -8,27 +8,33 @@
 //! needed, proves itself over the owner channel, relays the user's clicks
 //! (`commands.rs` → `client.rs`) and mirrors the service's events.
 //!
-//! Built without the `window` feature, the binary is the CLI and the
-//! service only; plain `roadie` prints the usage, and requests are answered
-//! in a native dialog instead of the window (`prompt.rs`).
+//! Built with no features, the binary is the standalone CLI release: no
+//! window, no service, no API. Every command runs in-process and the user
+//! answers requests in a native dialog (`cli/local.rs`, `prompt.rs`).
 
 pub mod actions;
+#[cfg(feature = "service")]
 pub mod api;
 pub mod cli;
+#[cfg(feature = "service")]
 pub mod client;
 #[cfg(feature = "window")]
 pub mod commands;
 pub mod consent;
-#[cfg(test)]
+#[cfg(all(test, feature = "service"))]
 mod e2e;
 pub mod events;
+pub mod intake;
+#[cfg(feature = "window")]
 pub mod mcp_setup;
+#[cfg(feature = "service")]
 pub mod owner;
 pub mod paths;
 pub mod prompt;
 pub mod recipe;
 pub mod requests;
 pub mod scheme;
+#[cfg(feature = "service")]
 pub mod service;
 pub mod tools;
 
@@ -38,7 +44,7 @@ pub fn run() {
     if let Some(code) = cli::maybe_run(&args) {
         std::process::exit(code);
     }
-    eprintln!("This Roadie has no window; it is driven from the command line.\n{}", cli::USAGE);
+    eprintln!("This Roadie is driven from the command line.\n{}", cli::USAGE);
     std::process::exit(3);
 }
 

@@ -39,15 +39,44 @@ pub fn label(name: &str) -> String {
 /// (`com.outcast1000.roadie.service`), `service-<hash>` for any other, so a
 /// service on a test or secondary data dir never touches the real item.
 pub fn service_item(data_root: &Path) -> String {
+    item_for("service", data_root)
+}
+
+fn item_for(prefix: &str, data_root: &Path) -> String {
     if data_root == crate::paths::default_data_root() {
-        return "service".into();
+        return prefix.into();
     }
     use sha2::{Digest, Sha256};
     let h = Sha256::digest(data_root.to_string_lossy().as_bytes());
-    format!("service-{:08x}", u32::from_be_bytes(h[..4].try_into().unwrap()))
+    format!("{prefix}-{:08x}", u32::from_be_bytes(h[..4].try_into().unwrap()))
+}
+
+/// The CLI release's one login item: `roadie --data-dir <dir> maintain --at-login`,
+/// which starts the daemons marked "start at login", runs the daily update
+/// pass, and exits. Named `cli` for the CLI's default data dir and
+/// `cli-<hash>` for any other, so each app bundling Roadie with its own
+/// data dir has its own item. It points at the binary's current path; if
+/// the binary moves, the next command run from the new place rewrites it.
+pub fn maintain_item(data_root: &Path) -> String {
+    item_for("cli", data_root)
+}
+
+pub fn enable_maintain(data_root: &Path) -> Result<(), String> {
+    let exe = launcher_exe()?;
+    let args = vec!["--data-dir".to_string(), data_root.to_string_lossy().into_owned(), "maintain".to_string(), "--at-login".to_string()];
+    enable_with(&maintain_item(data_root), "Roadie", &exe, &args, &data_root.join("logs").join("roadie-maintain.log"))
+}
+
+pub fn disable_maintain(data_root: &Path) -> Result<(), String> {
+    disable(&maintain_item(data_root))
+}
+
+pub fn maintain_enabled(data_root: &Path) -> bool {
+    is_enabled(&maintain_item(data_root))
 }
 
 /// Register (or rewrite, after the app moved) the service's login item.
+#[cfg(feature = "service")]
 pub fn enable_service(data_root: &Path) -> Result<(), String> {
     let exe = launcher_exe()?;
     let args = crate::service::service_args(data_root);
@@ -55,10 +84,12 @@ pub fn enable_service(data_root: &Path) -> Result<(), String> {
     enable_with(&service_item(data_root), "Roadie", &exe, &args, &log)
 }
 
+#[cfg(feature = "service")]
 pub fn disable_service(data_root: &Path) -> Result<(), String> {
     disable(&service_item(data_root))
 }
 
+#[cfg(feature = "service")]
 pub fn service_enabled(data_root: &Path) -> bool {
     is_enabled(&service_item(data_root))
 }

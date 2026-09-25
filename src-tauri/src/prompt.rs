@@ -1,17 +1,16 @@
-//! How a request reaches the user. Three surfaces, picked by the service:
+//! How a request reaches the user. Three surfaces:
 //!
-//! - **Window**: the desktop build (`window` feature) opens or focuses
-//!   Roadie's window, which shows `RequestPrompt` (`service::open_window_if_needed`).
-//! - **Dialog**: the build without the window shows a native yes/no dialog
-//!   from the service itself: `osascript` on macOS, `MessageBoxW` on
-//!   Windows, `zenity` or `kdialog` on Linux. The service owns the answer and
-//!   calls `actions::decide` directly, so no other process is involved.
-//! - **Terminal**: no screen at all (SSH, a headless box). The CLI may then
-//!   prompt on its own TTY (`roadie request <id> answer`) and approve over
-//!   the owner channel, which mints a *terminal* token only in this case
-//!   (`owner.rs`). On a machine with a screen the owner channel refuses the
-//!   terminal, because a program can run the CLI inside a pseudo-terminal it
-//!   controls and type "y" itself; a dialog on the screen it cannot answer.
+//! - **Window**: the desktop release's service opens or focuses Roadie's
+//!   window, which shows `RequestPrompt` (`service::open_window_if_needed`).
+//! - **Dialog**: the CLI release shows a native yes/no dialog from its own
+//!   process (`cli/local.rs`): `osascript` on macOS, `MessageBoxW` on
+//!   Windows, `zenity` or `kdialog` on Linux, and acts on the answer.
+//! - **Terminal**: no screen at all (SSH, a headless box). The CLI prompts
+//!   on its TTY. In the desktop release it then approves over the owner
+//!   channel, which mints a *terminal* token only in this case (`owner.rs`).
+//!   With a screen, a terminal is never asked: a program can run the CLI
+//!   inside a pseudo-terminal it controls and type "y" itself, while a
+//!   dialog on the screen it cannot answer.
 //!
 //! "Has a screen" is asked of the OS, not of the environment, where it can
 //! be (macOS: the security session's graphic access; Windows: whether the
@@ -23,12 +22,9 @@
 use crate::recipe::store::{self, Change};
 use crate::recipe::{self, ConfigField, Recipe, Source};
 use crate::tools::DryRun;
-use crate::requests::{self, Request, RequestKind, RequestStatus};
+use crate::requests::{Request, RequestKind};
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,7 +68,7 @@ pub fn terminal_allowed() -> bool {
 
 /// One request, described for a dialog or a terminal. Mirrors the window's
 /// `RequestPrompt`: who asks, what, what they decided, what is still open.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Prompt {
     pub headline: String,
@@ -401,81 +397,6 @@ pub fn describe_here(r: &Request) -> Prompt {
     describe(r, trusted.as_ref(), &stored_config, &review)
 }
 
-// --- The service's dialog queue ---
-
-fn shown() -> &'static Mutex<HashSet<String>> {
-    static S: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-static RUNNING: AtomicBool = AtomicBool::new(false);
-
-fn next_unshown() -> Option<Request> {
-    let seen = shown().lock().unwrap();
-    requests::pending().into_iter().find(|r| !seen.contains(&r.id))
-}
-
-/// Show every pending request not shown yet, one dialog at a time, on a
-/// background thread. A request whose dialog was dismissed stays pending
-/// and is not shown again until `show_again`.
-pub fn ask_pending() {
-    // Unit tests create requests through the API; they must not pop dialogs.
-    if cfg!(test) {
-        return;
-    }
-    if RUNNING.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let spawned = std::thread::Builder::new().name("prompt".into()).spawn(|| loop {
-        match next_unshown() {
-            Some(r) => {
-                shown().lock().unwrap().insert(r.id.clone());
-                present(&r);
-            }
-            None => {
-                RUNNING.store(false, Ordering::SeqCst);
-                // A request may have arrived between the check and the store.
-                if next_unshown().is_some() && !RUNNING.swap(true, Ordering::SeqCst) {
-                    continue;
-                }
-                return;
-            }
-        }
-    });
-    if let Err(e) = spawned {
-        RUNNING.store(false, Ordering::SeqCst);
-        log::warn!("could not start the prompt thread: {e}");
-    }
-}
-
-/// `roadie request <id> answer` on a machine with a screen: show it again.
-pub fn show_again(id: &str) {
-    shown().lock().unwrap().remove(id);
-}
-
-fn present(r: &Request) {
-    let p = describe_here(r);
-    let answer = dialog::show(&p);
-    // Decided elsewhere while the dialog was up: nothing to do.
-    if requests::get(&r.id).map(|x| x.status) != Some(RequestStatus::Pending) {
-        return;
-    }
-    match answer {
-        Ok(dialog::Answer::Approve) if p.approve.is_some() => {
-            log::info!("request {} approved in the dialog", r.id);
-            if let Err(e) = crate::actions::decide(&r.id, true, None) {
-                log::warn!("request {}: {e}", r.id);
-            }
-        }
-        Ok(dialog::Answer::Approve | dialog::Answer::Decline) => {
-            log::info!("request {} declined in the dialog", r.id);
-            let _ = crate::actions::decide(&r.id, false, None);
-        }
-        Ok(dialog::Answer::Dismissed) => log::info!("request {} dismissed; still pending (`roadie request {} answer` shows it again)", r.id, r.id),
-        Err(e) => log::warn!("could not show a dialog for request {}: {e}", r.id),
-    }
-}
-
 // --- Is there a screen? ---
 
 pub mod screen {
@@ -670,8 +591,12 @@ pub mod dialog {
                 .stdin(std::process::Stdio::null())
                 .output()
                 .map_err(|e| format!("run osascript: {e}"))?;
+            // Killed (the user logged out, a script ended it): no answer.
+            if out.status.code().is_none() {
+                return Ok(Answer::Dismissed);
+            }
             if !out.status.success() {
-                return Err(format!("osascript: {}", String::from_utf8_lossy(&out.stderr).trim()));
+                return Err(format!("osascript exited {}: {}", out.status, String::from_utf8_lossy(&out.stderr).trim()));
             }
             Ok(mac_answer(&String::from_utf8_lossy(&out.stdout), p.approve.as_deref()))
         }
@@ -736,6 +661,7 @@ pub mod dialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::requests::RequestStatus;
 
     fn request(kind: RequestKind, by: &str) -> Request {
         Request { id: "r1".into(), kind, requested_by: by.into(), status: RequestStatus::Pending, created_at: 0, error: None, progress: None }

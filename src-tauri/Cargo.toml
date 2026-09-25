@@ -10,13 +10,16 @@ license = "GPL-3.0-or-later"
 name = "roadie_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-# `window` (default) is the desktop app: the Tauri window plus the CLI and
-# the service. Without it (`--no-default-features`) the binary is the CLI and
-# the service only, and requests are answered in a native dialog
-# (`src/prompt.rs`).
+# Two releases from one crate:
+# - desktop (default features): the Tauri window, the service with its local
+#   API and owner channel, and the MCP server it bundles.
+# - CLI (`--no-default-features`): one standalone binary that does everything
+#   in-process and asks the user in a native dialog (`src/cli/local.rs`).
 [features]
 default = ["window"]
+service = ["dep:axum", "dep:tokio"]
 window = [
+  "service",
   "dep:tauri-build",
   "dep:tauri",
   "dep:tauri-plugin-opener",
@@ -50,8 +53,8 @@ sha2 = "0.10"
 # rather than the full rand crate.
 getrandom = "0.3"
 zip = { version = "8", default-features = false, features = ["deflate"] }
-axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

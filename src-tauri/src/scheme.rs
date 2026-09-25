@@ -13,7 +13,7 @@
 //! installed by a link: the window focuses the tool's row and the user
 //! clicks Install.
 
-use crate::{consent, events, recipe};
+use crate::{consent, recipe};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -122,7 +122,7 @@ pub fn handle(app: &tauri::AppHandle, url: &str) {
     std::thread::spawn(move || {
         if let Err(e) = client::call("POST", "/v1/owner/intent", Some(serde_json::json!({ "url": url })), true) {
             log::warn!("deep link {url} not accepted: {e}");
-            events::emit("intent-error", serde_json::json!({ "url": url, "error": e }));
+            crate::events::emit("intent-error", serde_json::json!({ "url": url, "error": e }));
         }
     });
     focus_window(app);
@@ -130,8 +130,9 @@ pub fn handle(app: &tauri::AppHandle, url: &str) {
 
 /// Something needs the user: bring a connected window forward, or show the
 /// request wherever this service can (`service::ask_user`).
+#[cfg(feature = "service")]
 pub fn focus_if_possible() {
-    events::emit("focus-request", serde_json::Value::Null);
+    crate::events::emit("focus-request", serde_json::Value::Null);
     crate::service::ask_user();
 }
 

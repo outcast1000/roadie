@@ -15,7 +15,7 @@
 //! proxy into it. The token is compared through SHA-256 digests.
 
 use crate::recipe::{self, store, Recipe};
-use crate::{actions, consent, events, owner, paths, requests, service, tools};
+use crate::{actions, consent, events, intake, owner, paths, requests, service, tools};
 use axum::{
     body::Bytes,
     extract::{Path as AxumPath, Query, Request, State},
@@ -279,23 +279,26 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Sen
 }
 
 fn trusted(name: &str) -> Result<Recipe, Response> {
-    store::get_trusted(name).map_err(|e| {
-        if e.starts_with("unknown") {
-            err(StatusCode::NOT_FOUND, e)
-        } else {
-            err(StatusCode::CONFLICT, e)
-        }
-    })
+    intake::trusted(name).map_err(refusal)
+}
+
+/// A shared `intake` refusal as an HTTP error.
+fn refusal(r: intake::Refusal) -> Response {
+    let status = match r.kind {
+        intake::Refused::BadRequest => StatusCode::BAD_REQUEST,
+        intake::Refused::NotFound => StatusCode::NOT_FOUND,
+        intake::Refused::Conflict => StatusCode::CONFLICT,
+        intake::Refused::Invalid => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    if r.extra.is_object() {
+        err_with(status, r.message, r.extra)
+    } else {
+        err(status, r.message)
+    }
 }
 
 fn public_status(s: tools::ToolStatus, stored: &store::Stored) -> Value {
-    let mut v = serde_json::to_value(s).unwrap_or_default();
-    if let Some(o) = v.as_object_mut() {
-        o.insert("origin".into(), serde_json::to_value(stored.origin).unwrap_or_default());
-        o.insert("trusted".into(), Value::Bool(stored.trusted()));
-        o.remove("pid");
-    }
-    v
+    intake::public_status(s, stored)
 }
 
 // --- Public ---
@@ -342,8 +345,7 @@ async fn get_connection(State(state): State<ApiState>, AxumPath(name): AxumPath<
         Ok(r) => r,
         Err(r) => return r,
     };
-    let policy = recipe.connection.as_ref().map(|c| c.policy).unwrap_or(recipe::ConnectionPolicy::None);
-    if policy == recipe::ConnectionPolicy::None {
+    if recipe.connection.as_ref().map(|c| c.policy).unwrap_or(recipe::ConnectionPolicy::None) == recipe::ConnectionPolicy::None {
         return err(StatusCode::NOT_FOUND, format!("{} exposes no connection", recipe.display_name));
     }
     let bearer_ok = req
@@ -353,48 +355,29 @@ async fn get_connection(State(state): State<ApiState>, AxumPath(name): AxumPath<
         .and_then(|h| h.strip_prefix("Bearer "))
         .is_some_and(|t| Sha256::digest(t.trim().as_bytes()) == Sha256::digest(state.token.as_bytes()));
     let consumer = q.get("consumer").cloned();
-    let result = blocking(move || {
-        let st = tools::status(&recipe);
-        let url = st.url.clone().ok_or("tool has no connection URL")?;
-        if let Some(id) = consumer {
-            if !consent::is_valid_id(&id) {
-                return Err("bad consumer id".to_string());
+    let result = tokio::task::spawn_blocking(move || match consumer {
+        Some(id) => {
+            let out = intake::consumer_connection(&recipe, &id);
+            // A known consumer that is not approved yet: queue its prompt.
+            // Unknown ids are not auto-registered: a name is not a credential.
+            if out == Err(intake::ConnError::ConsentRequired) {
+                let display = consent::get(&id).map(|r| r.display_name).unwrap_or(id.clone());
+                requests::create(requests::RequestKind::Connect { consumer: id, tool: recipe.name.clone(), return_url: None }, &display);
             }
-            match consent::grant(&id, &recipe.name) {
-                // Approved, but nothing to connect to: no key until installed.
-                Some(_) if !st.installed => Err("not-installed".to_string()),
-                Some(g) => Ok(json!({ "url": url, "apiKey": if g.key.is_empty() { Value::Null } else { Value::String(g.key) }, "policy": policy, "running": st.running, "healthy": st.healthy })),
-                None => {
-                    // Unknown consumer ids are not auto-registered: a name is
-                    // not a credential. Known ones queue a consent prompt.
-                    if consent::get(&id).is_some() {
-                        requests::create(requests::RequestKind::Connect { consumer: id.clone(), tool: recipe.name.clone(), return_url: None }, &consent::get(&id).map(|r| r.display_name).unwrap_or(id.clone()));
-                        Err("consent-required".to_string())
-                    } else {
-                        Err("unknown-consumer".to_string())
-                    }
-                }
-            }
-        } else if bearer_ok {
-            if !st.installed {
-                return Err("not-installed".to_string());
-            }
-            let p = paths::tool_paths(&recipe.name)?;
-            let s = tools::state::load(&p.data);
-            let key = s.secrets.get("internalKey").cloned();
-            Ok(json!({ "url": url, "apiKey": key, "policy": policy, "running": st.running, "healthy": st.healthy }))
-        } else {
-            Err("consumer-required".to_string())
+            out
         }
+        None if bearer_ok => intake::owner_connection(&recipe),
+        None => Err(intake::ConnError::Other("consumer-required".into())),
     })
-    .await;
+    .await
+    .unwrap_or_else(|e| Err(intake::ConnError::Other(format!("task failed: {e}"))));
     match result {
         Ok(v) => Json(v).into_response(),
-        Err(e) if e == "consent-required" => err_with(StatusCode::FORBIDDEN, "the user has not approved this consumer for this tool yet — ask them to approve it in Roadie", json!({ "reason": "consent-required" })),
-        Err(e) if e == "unknown-consumer" => err_with(StatusCode::FORBIDDEN, "unknown consumer; register it via POST /v1/consumers (bearer) first", json!({ "reason": "unknown-consumer" })),
-        Err(e) if e == "consumer-required" => err(StatusCode::UNAUTHORIZED, "pass ?consumer=<id> or a bearer token"),
-        Err(e) if e == "not-installed" => err_with(StatusCode::CONFLICT, "the tool is not installed; ask to install it first", json!({ "reason": "not-installed" })),
-        Err(e) => err(StatusCode::BAD_REQUEST, e),
+        Err(intake::ConnError::ConsentRequired) => err_with(StatusCode::FORBIDDEN, "the user has not approved this consumer for this tool yet — ask them to approve it in Roadie", json!({ "reason": "consent-required" })),
+        Err(intake::ConnError::UnknownConsumer) => err_with(StatusCode::FORBIDDEN, "unknown consumer; register it via POST /v1/consumers (bearer) first", json!({ "reason": "unknown-consumer" })),
+        Err(intake::ConnError::NotInstalled) => err_with(StatusCode::CONFLICT, "the tool is not installed; ask to install it first", json!({ "reason": "not-installed" })),
+        Err(intake::ConnError::Other(e)) if e == "consumer-required" => err(StatusCode::UNAUTHORIZED, "pass ?consumer=<id> or a bearer token"),
+        Err(intake::ConnError::Other(e)) => err(StatusCode::BAD_REQUEST, e),
     }
 }
 
@@ -425,62 +408,33 @@ async fn restart_tool(AxumPath(name): AxumPath<String>) -> Response {
 }
 /// Fetch and stage the latest release; applies when idle. Allowed without
 /// a prompt because the tool is already installed by the user's choice.
-/// A recipe a client sent with an install or update: valid, named like the
-/// URL, and compared with the stored one. `None` as the change means it is
-/// exactly the trusted recipe, so nothing needs reviewing.
-fn brought_recipe(name: &str, v: Value) -> Result<(Recipe, Option<store::Change>), Response> {
-    let recipe = recipe::from_value(v).map_err(|errors| {
-        (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": "the recipe you sent is invalid; each error names a JSON pointer inside /recipe", "errors": errors }))).into_response()
-    })?;
-    if recipe.name != name {
-        return Err(err(StatusCode::BAD_REQUEST, format!("URL names {name} but /recipe/name is {}; use the same name", recipe.name)));
-    }
-    let change = store::compare(&recipe);
-    Ok((recipe, change))
-}
-
 /// Update an installed tool. With a `{recipe}` body that differs from the
 /// trusted one, nothing runs yet: a `replaceRecipe` request asks the user to
 /// review and trust it, and approving updates the tool (202). The same
 /// recipe, or none, updates right away.
 async fn update_tool(AxumPath(name): AxumPath<String>, headers: axum::http::HeaderMap, body: Bytes) -> Response {
-    if !body.is_empty() {
-        let v = match recipe_body(&body) {
-            Ok(v) => v,
+    let brought = if body.is_empty() {
+        None
+    } else {
+        match recipe_body(&body) {
+            Ok(v) => Some(v),
             Err(r) => return r,
-        };
-        let (recipe, change) = match brought_recipe(&name, v) {
-            Ok(x) => x,
-            Err(r) => return r,
-        };
-        if let Some(change) = change {
-            let installed = match store::get_trusted(&name) {
-                Ok(current) => tools::status(&current).installed,
-                Err(_) => false,
-            };
-            if !installed {
-                return err(StatusCode::CONFLICT, format!("{} is not installed; install it with this recipe instead (POST /v1/tools/{name}/install with {{\"recipe\": …}})", recipe.display_name));
-            }
-            let by = requested_by_headers(&headers);
-            let r = requests::create(requests::RequestKind::ReplaceRecipe { tool: name, recipe: Box::new(recipe), recipe_change: change }, &by);
+        }
+    };
+    match intake::update(&name, brought) {
+        Err(r) => refusal(r),
+        Ok(intake::UpdatePlan::Review { kind, change }) => {
+            let r = requests::create(kind, &requested_by_headers(&headers));
             crate::scheme::focus_if_possible();
-            return (
+            (
                 StatusCode::ACCEPTED,
                 Json(json!({ "requestId": r.id, "status": r.status, "recipeChange": change,
                     "hint": "the recipe differs from the trusted one; the user must review and approve it in Roadie, which then updates the tool. Poll GET /v1/requests/{id}." })),
             )
-                .into_response();
+                .into_response()
         }
+        Ok(intake::UpdatePlan::Now(_)) => tool_action(name, |r| intake::update_now(r, &mut |_, _, _| {})).await,
     }
-    tool_action(name, |r| {
-        let st = tools::status(r);
-        if !st.installed {
-            return Err(format!("{} is not installed", r.display_name));
-        }
-        tools::check_updates(r)?;
-        tools::install(r, &mut |_, _, _| {})
-    })
-    .await
 }
 async fn check_updates_tool(AxumPath(name): AxumPath<String>) -> Response {
     tool_action(name, tools::check_updates).await
@@ -631,57 +585,13 @@ async fn install_tool(AxumPath(name): AxumPath<String>, req: Request) -> Respons
             _ => return err(StatusCode::BAD_REQUEST, "body must be a JSON object: { \"config\": { \"<key>\": <value> }, \"consumer\": \"<id>\", \"recipe\": { … } }"),
         }
     };
-    let (recipe, proposed) = match brought {
-        Some(v) => match brought_recipe(&name, v) {
-            Ok(x) => x,
-            Err(r) => return r,
-        },
-        None => match trusted(&name) {
-            Ok(r) => (r, None),
-            Err(r) => return r,
-        },
+    let plan = match blocking(move || Ok(intake::install(&name, intake::InstallAsk { values, consumer, recipe: brought }))).await {
+        Ok(Ok(p)) => p,
+        Ok(Err(r)) => return refusal(r),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
-    if let Some(c) = &consumer {
-        if consent::get(c).is_none() {
-            return err(StatusCode::BAD_REQUEST, format!("unknown consumer `{c}`; register it with POST /v1/consumers first"));
-        }
-        if recipe.connection.as_ref().map(|c| c.policy).unwrap_or(recipe::ConnectionPolicy::None) == recipe::ConnectionPolicy::None {
-            return err(StatusCode::BAD_REQUEST, format!("{} exposes no connection; drop `consumer`", recipe.display_name));
-        }
-    }
-    let mut config_only = values.clone();
-    if let Err(e) = tools::install_options(&recipe, &mut config_only) {
-        return err(StatusCode::UNPROCESSABLE_ENTITY, format!("config: {e}"));
-    }
-    if let Err(e) = tools::state::validate_patch(&recipe, &config_only) {
-        return err(StatusCode::UNPROCESSABLE_ENTITY, format!("config: {e}"));
-    }
-    let current = tools::status(&recipe).config;
-    if let Some((message, missing)) = crate::prompt::refuse_missing(&recipe, &values, &current, crate::prompt::surface()) {
-        return err_with(StatusCode::UNPROCESSABLE_ENTITY, message, json!({ "missing": missing }));
-    }
-    let mut decisions: Vec<Value> = recipe
-        .install_fields()
-        .iter()
-        .map(|f| {
-            let settled = values.contains_key(&f.key)
-                || current.get(&f.key).is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
-                || current.get(&format!("has_{}", f.key)) == Some(&Value::Bool(true));
-            json!({ "key": f.key, "label": f.label, "kind": f.kind, "required": f.required, "help": f.help, "settled": settled })
-        })
-        .collect();
-    for (key, label, offer) in [
-        ("startNow", "Start now, right after installing", recipe.start_after_install),
-        ("autostart", "Start at login", recipe.autostart),
-    ] {
-        if let Some(o) = offer {
-            decisions.push(json!({
-                "key": key, "label": label, "kind": "bool", "required": false, "default": o.default,
-                "settled": true, "value": values.get(key).and_then(|v| v.as_bool()).unwrap_or(o.default),
-            }));
-        }
-    }
-    let r = requests::create(requests::install_kind(&recipe, values, consumer, proposed), &by);
+    let (decisions, proposed) = (plan.decisions, plan.recipe_change);
+    let r = requests::create(plan.kind, &by);
     crate::scheme::focus_if_possible();
     (
         StatusCode::ACCEPTED,
@@ -705,11 +615,12 @@ async fn uninstall_tool(State(state): State<ApiState>, AxumPath(name): AxumPath<
         return err(StatusCode::UNAUTHORIZED, "missing or invalid bearer token");
     }
     let by = requested_by(&req);
-    if let Err(r) = trusted(&name) {
-        return r;
-    }
     let keep_data = q.get("keepData").map(|v| v == "true" || v == "1").unwrap_or(false);
-    let r = requests::create(requests::RequestKind::Uninstall { tool: name, keep_data }, &by);
+    let kind = match intake::uninstall(&name, keep_data) {
+        Ok(k) => k,
+        Err(r) => return refusal(r),
+    };
+    let r = requests::create(kind, &by);
     crate::scheme::focus_if_possible();
     (StatusCode::ACCEPTED, Json(json!({ "requestId": r.id, "status": r.status }))).into_response()
 }
@@ -741,7 +652,6 @@ async fn get_request_prompt(AxumPath(id): AxumPath<String>) -> Response {
 async fn reshow_request(AxumPath(id): AxumPath<String>) -> Response {
     match requests::get(&id) {
         Some(r) if r.status == requests::RequestStatus::Pending => {
-            crate::prompt::show_again(&id);
             crate::scheme::focus_if_possible();
             Json(json!({ "id": id, "surface": crate::prompt::surface().name() })).into_response()
         }
