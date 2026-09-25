@@ -28,6 +28,9 @@ pub fn run_client(root: &Path, argv_in: &[String]) -> Result<(i32, Value), Strin
     let (as_name, argv) = split_as(argv_in);
     let argv = &argv[..];
     let cmd = argv.first().map(String::as_str).unwrap_or("help");
+    if matches!(cmd, "version" | "--version") {
+        return Ok((0, version_info()));
+    }
     if matches!(cmd, "help" | "--help" | "-h") {
         return Ok((0, json!({ "usage": USAGE })));
     }

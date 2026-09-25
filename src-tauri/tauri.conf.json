@@ -45,7 +45,7 @@
       }
     },
     "updater": {
-      "pubkey": "",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFBNzhENjNDQUU5RDVBRQpSV1N1MWVuS1k0Mm5DakF3akVISGg5WnlJS0VxOFRnczVBTzhiS09MMUxDbktrL0Y4YzhoMDlMbQo=",
       "endpoints": [
         "https://github.com/outcast1000/roadie/releases/latest/download/latest.json"
       ]

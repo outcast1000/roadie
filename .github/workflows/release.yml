@@ -1,0 +1,255 @@
+# Builds and publishes one of Roadie's two releases, chosen by the tag:
+#
+#   desktop-v0.2.0  → the desktop app (window + service + API + MCP): .dmg and
+#                     .app.tar.gz for macOS (Apple silicon and Intel), an NSIS
+#                     installer for Windows, and latest.json for its updater.
+#   cli-v0.2.0      → the standalone CLI: one `roadie` binary per platform,
+#                     SHA256SUMS, and manifest.json for apps that bundle it.
+#
+# The version after the prefix must match every version file
+# (`node scripts/version.mjs --check`). Only desktop releases are marked
+# "latest", so the desktop updater's releases/latest/download/latest.json
+# never lands on a CLI release. See RELEASING.md.
+
+name: Release
+
+on:
+  push:
+    tags: ["desktop-v*", "cli-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "An existing tag to build again, e.g. cli-v0.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  meta:
+    name: Which release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.m.outputs.tag }}
+      kind: ${{ steps.m.outputs.kind }}
+      version: ${{ steps.m.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - id: m
+        name: Read the tag and check the version files
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          case "$TAG" in
+            desktop-v*) KIND=desktop; VERSION="${TAG#desktop-v}" ;;
+            cli-v*)     KIND=cli;     VERSION="${TAG#cli-v}" ;;
+            *) echo "::error::tags are desktop-vX.Y.Z or cli-vX.Y.Z, got $TAG"; exit 1 ;;
+          esac
+          node scripts/version.mjs --check "$VERSION"
+          {
+            echo "tag=$TAG"
+            echo "kind=$KIND"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+      - name: Desktop needs the updater signing key
+        if: steps.m.outputs.kind == 'desktop'
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::set the TAURI_SIGNING_PRIVATE_KEY secret (RELEASING.md, 'One-time setup')"; exit 1
+          fi
+          node -e 'const c=require("./src-tauri/tauri.conf.json"); if(!c.plugins?.updater?.pubkey){console.log("::error::fill plugins.updater.pubkey in src-tauri/tauri.conf.json (RELEASING.md)");process.exit(1)}'
+
+  test:
+    name: Test (${{ matrix.os }})
+    needs: meta
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci --legacy-peer-deps
+      # The window build embeds ../dist at compile time.
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:mcp
+      - name: Rust, desktop release
+        run: cargo test --locked
+        working-directory: src-tauri
+      - name: Rust, CLI release
+        run: cargo test --locked --no-default-features --target-dir target/cli
+        working-directory: src-tauri
+
+  cli:
+    name: CLI (${{ matrix.platform }})
+    needs: [meta, test]
+    if: needs.meta.outputs.kind == 'cli'
+    strategy:
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin, platform: darwin-arm64, exe: roadie }
+          - { os: macos-latest, target: x86_64-apple-darwin, platform: darwin-x64, exe: roadie }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, platform: windows-x64, exe: roadie.exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: cli-${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --no-default-features --target ${{ matrix.target }}
+        working-directory: src-tauri
+      - name: It runs and knows its version
+        if: matrix.platform != 'darwin-x64'
+        shell: bash
+        run: |
+          out="$(src-tauri/target/${{ matrix.target }}/release/${{ matrix.exe }} version)"
+          echo "$out"
+          echo "$out" | grep -q '"release": "cli"'
+          echo "$out" | grep -q '"version": "${{ needs.meta.outputs.version }}"'
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          name="roadie-cli-${{ needs.meta.outputs.version }}-${{ matrix.platform }}.tar.gz"
+          tar -czf "$name" -C "src-tauri/target/${{ matrix.target }}/release" roadie
+          echo "ASSET=$name" >> "$GITHUB_ENV"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "roadie-cli-${{ needs.meta.outputs.version }}-${{ matrix.platform }}.zip"
+          Compress-Archive -Path "src-tauri/target/${{ matrix.target }}/release/roadie.exe" -DestinationPath $name
+          "ASSET=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.platform }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  publish-cli:
+    name: Publish the CLI release
+    needs: [meta, cli]
+    if: needs.meta.outputs.kind == 'cli'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: dist-cli
+      - name: Checksums and manifest
+        shell: bash
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          cd dist-cli
+          sha256sum roadie-cli-* > SHA256SUMS
+          cat SHA256SUMS
+          node - <<'JS'
+          const fs = require("fs");
+          const { TAG, VERSION, REPO } = process.env;
+          const assets = {};
+          for (const line of fs.readFileSync("SHA256SUMS", "utf8").trim().split("\n")) {
+            const [sha256, file] = line.split(/\s+/);
+            const platform = file.match(/-(darwin-arm64|darwin-x64|windows-x64)\.(tar\.gz|zip)$/)[1];
+            assets[platform] = { file, url: `https://github.com/${REPO}/releases/download/${TAG}/${file}`, sha256, binary: platform.startsWith("windows") ? "roadie.exe" : "roadie" };
+          }
+          fs.writeFileSync("manifest.json", JSON.stringify({ name: "roadie-cli", version: VERSION, tag: TAG, assets }, null, 2) + "\n");
+          JS
+          cat manifest.json
+      - name: Create or update the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          cat > notes.md <<EOF
+          Roadie CLI ${VERSION}: the standalone command-line release (no service, no window).
+
+          Download the archive for your platform, check it against \`SHA256SUMS\`, and run \`roadie help\`.
+          Apps that bundle Roadie can read \`manifest.json\` for each platform's URL and checksum.
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist-cli/* --clobber
+          else
+            gh release create "$TAG" dist-cli/* --title "Roadie CLI $VERSION" --notes-file notes.md --latest=false
+          fi
+
+  desktop:
+    name: Desktop (${{ matrix.platform }})
+    needs: [meta, test]
+    if: needs.meta.outputs.kind == 'desktop'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin, platform: darwin-arm64, bundles: "app,dmg" }
+          - { os: macos-latest, target: x86_64-apple-darwin, platform: darwin-x64, bundles: "app,dmg" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, platform: windows-x64, bundles: nsis }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: desktop-${{ matrix.target }}
+      - run: npm ci --legacy-peer-deps
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ needs.meta.outputs.tag }}
+          releaseName: Roadie ${{ needs.meta.outputs.version }}
+          releaseBody: "Roadie ${{ needs.meta.outputs.version }}, the desktop app. It updates itself from here once installed."
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}

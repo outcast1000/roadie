@@ -66,6 +66,7 @@ mod const_format_usage {
                 $extra,
                 "  <tool> is a recipe name or the path of a recipe file (.json) your app ships. install and\n",
                 "  upgrade send the file along: a new or changed recipe is shown to the user to review and trust.\n",
+                "  roadie version\n",
                 $options,
                 "exit codes: 0 ok · 1 failed · 2 declined by the user · 3 usage or connection error"
             )
@@ -163,12 +164,12 @@ pub fn parse(args: &[String]) -> Option<Mode> {
         .enumerate()
         .find(|(i, t)| !t.starts_with("--") && (*i == 0 || rest[i - 1] != "--as"))
         .map(|(_, t)| t.as_str())
-        .or_else(|| rest.iter().find(|t| matches!(t.as_str(), "--help" | "-h")).map(String::as_str));
+        .or_else(|| rest.iter().find(|t| matches!(t.as_str(), "--help" | "-h" | "--version")).map(String::as_str));
     if serve {
         Some(Mode::Serve { data_dir: dir })
     } else if start_tool {
         Some(Mode::LegacyStartTool { data_dir: dir })
-    } else if matches!(command, Some("tool" | "request" | "service" | "recipe" | "maintain" | "help" | "--help" | "-h")) {
+    } else if matches!(command, Some("tool" | "request" | "service" | "recipe" | "maintain" | "version" | "--version" | "help" | "--help" | "-h")) {
         Some(Mode::Client { data_dir: dir, argv: rest })
     } else {
         None
@@ -220,6 +221,12 @@ pub fn target(arg: &str) -> Result<Target, String> {
     };
     let name = v.get("name").and_then(|n| n.as_str()).filter(|n| !n.is_empty()).ok_or_else(|| format!("recipe {arg} has no /name"))?.to_string();
     Ok(Target { name, recipe: Some(v), file: Some(arg.to_string()) })
+}
+
+/// `roadie version`: which release this is and its version, so an app that
+/// bundles the CLI can tell what it ships.
+pub(crate) fn version_info() -> Value {
+    serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "release": if cfg!(feature = "service") { "desktop" } else { "cli" } })
 }
 
 /// Add `recipeDiffers` to an object result when a file was given.

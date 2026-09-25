@@ -83,6 +83,9 @@ cd src-tauri && cargo test --no-default-features --target-dir target/cli        
 ./src-tauri/target/cli/debug/roadie --data-dir /tmp/r tool install ./my-slskd.json    # asks in a dialog from this process, exits 0/1/2
 ```
 
+- Releases: tag `desktop-v<version>` or `cli-v<version>` after `node scripts/version.mjs
+  <version>` (five files share the number); `.github/workflows/release.yml` tests, builds and
+  publishes. Only desktop releases are "latest" (the updater's URL). See `RELEASING.md`.
 - `roadie://` deep links do not work under `tauri dev` on macOS — LaunchServices learns the
   scheme from a bundle's Info.plist. Build the debug bundle and `open` it once.
 - A local `tauri build` fails at the last step ("no private key") until `tauri signer generate`
