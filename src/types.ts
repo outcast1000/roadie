@@ -34,6 +34,8 @@ export interface ToolRow {
   url: string | null;
   binPath: string | null;
   connectionPolicy: ConnectionPolicy;
+  /** The recipe declares a web-page login; fetch it with `tool_web_login`. */
+  hasWebLogin: boolean;
   approvedConsumers: string[];
   config: Record<string, unknown>;
   details: Record<string, unknown>;

@@ -1,6 +1,6 @@
 [package]
 name = "roadie"
-version = "0.1.0"
+version = "0.2.0"
 description = "Roadie — installs, configures and runs the tools your apps need"
 authors = ["outcast1000"]
 edition = "2021"

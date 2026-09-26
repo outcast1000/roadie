@@ -195,7 +195,11 @@ pub fn consumer_connection(recipe: &Recipe, consumer: &str) -> Result<Value, Con
     let url = st.url.clone().ok_or_else(|| ConnError::Other("tool has no connection URL".into()))?;
     match consent::grant(consumer, &recipe.name) {
         Some(_) if !st.installed => Err(ConnError::NotInstalled),
-        Some(g) => Ok(json!({ "url": url, "apiKey": if g.key.is_empty() { Value::Null } else { Value::String(g.key) }, "policy": policy, "running": st.running, "healthy": st.healthy })),
+        Some(g) => {
+            let mut out = json!({ "url": url, "apiKey": if g.key.is_empty() { Value::Null } else { Value::String(g.key) }, "policy": policy, "running": st.running, "healthy": st.healthy });
+            with_web_login(recipe, &mut out);
+            Ok(out)
+        }
         None if consent::get(consumer).is_some() => Err(ConnError::ConsentRequired),
         None => Err(ConnError::UnknownConsumer),
     }
@@ -215,5 +219,37 @@ pub fn owner_connection(recipe: &Recipe) -> Result<Value, ConnError> {
     }
     let p = paths::tool_paths(&recipe.name).map_err(ConnError::Other)?;
     let key = tools::state::load(&p.data).secrets.get("internalKey").cloned();
-    Ok(json!({ "url": url, "apiKey": key, "policy": policy, "running": st.running, "healthy": st.healthy }))
+    let mut out = json!({ "url": url, "apiKey": key, "policy": policy, "running": st.running, "healthy": st.healthy });
+    with_web_login(recipe, &mut out);
+    Ok(out)
+}
+
+/// Add `webLogin` to a connection answer when the recipe declares one. The
+/// same holders already get an API key that can do what the web page does,
+/// so the login grants nothing more — it lets a person open the page. A
+/// login that fails to expand is logged and left out: the connection is
+/// still good without it.
+fn with_web_login(recipe: &Recipe, out: &mut Value) {
+    match tools::web_login(recipe) {
+        Ok(Some(login)) => {
+            if let Some(o) = out.as_object_mut() {
+                o.insert("webLogin".into(), login);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => log::error!("{}: web login did not expand: {e}", recipe.name),
+    }
+}
+
+/// The web login for the owner's own screen (the window's "Show login").
+pub fn owner_web_login(name: &str) -> Result<Value, Refusal> {
+    let recipe = trusted(name)?;
+    if !tools::status(&recipe).installed {
+        return Err(Refusal::new(Refused::Conflict, format!("{} is not installed", recipe.display_name)));
+    }
+    match tools::web_login(&recipe) {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => Err(Refusal::new(Refused::NotFound, format!("{} declares no web login", recipe.display_name))),
+        Err(e) => Err(Refusal::new(Refused::Conflict, e)),
+    }
 }

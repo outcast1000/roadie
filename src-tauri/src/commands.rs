@@ -71,6 +71,12 @@ pub async fn tool_check_updates(name: String) -> Result<Value, String> {
 pub async fn tool_update(name: String) -> Result<Value, String> {
     relay("POST", format!("/v1/tools/{}/update", enc(&name)), None, false).await
 }
+/// The user clicked "Show login": the tool's web-page sign-in, fetched on
+/// demand so it never rides in a status payload.
+#[tauri::command]
+pub async fn tool_web_login(name: String) -> Result<Value, String> {
+    relay("GET", format!("/v1/owner/tools/{}/web-login", enc(&name)), None, true).await
+}
 #[tauri::command]
 pub async fn tool_uninstall(name: String, keep_data: bool) -> Result<(), String> {
     relay("DELETE", format!("/v1/owner/tools/{}?keepData={keep_data}", enc(&name)), None, true).await.map(|_| ())
@@ -232,6 +238,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         tool_logs,
         tool_open_logs,
         tool_open_url,
+        tool_web_login,
         recipe_list,
         recipe_get,
         recipe_trust,

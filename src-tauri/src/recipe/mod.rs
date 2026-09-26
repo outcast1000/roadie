@@ -336,6 +336,18 @@ pub struct Connection {
     pub max_len: Option<usize>,
     /// Base URL consumers connect to, e.g. `http://127.0.0.1:{ports.web}`.
     pub url: String,
+    /// The sign-in for the tool's own web page, when it has one behind a
+    /// login Roadie generated (slskd's web UI). Expanded like `url`. Handed
+    /// only to the owner and to consumers the user approved, never in status.
+    #[serde(default)]
+    pub web_login: Option<WebLogin>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebLogin {
+    pub username: String,
+    pub password: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -707,6 +719,16 @@ pub fn validate(r: &Recipe) -> Vec<ValidationError> {
 
     if let Some(c) = &r.connection {
         check_placeholders(r, &c.url, "/connection/url", all_roots, &mut errs);
+        if let Some(w) = &c.web_login {
+            for (v, field) in [(&w.username, "username"), (&w.password, "password")] {
+                let pointer = format!("/connection/webLogin/{field}");
+                if v.trim().is_empty() {
+                    errs.push(ValidationError::new(&pointer, "empty: give the literal value or a placeholder such as `{secrets.webPassword}`"));
+                } else {
+                    check_placeholders(r, v, &pointer, all_roots, &mut errs);
+                }
+            }
+        }
         if c.policy == ConnectionPolicy::PerConsumerKey {
             if let (Some(a), Some(b)) = (c.min_len, c.max_len) {
                 if a > b {
@@ -1027,6 +1049,23 @@ mod tests {
         assert!(!r.supported_on(&Platform { os: "linux", arch: "arm64" }));
         assert_eq!(r.ports["web"].default, 5030);
         assert!(r.connection.as_ref().unwrap().policy == ConnectionPolicy::PerConsumerKey);
+        let login = r.connection.as_ref().unwrap().web_login.as_ref().expect("slskd's web UI sits behind a generated login");
+        assert_eq!(login.password, "{secrets.webPassword}");
+    }
+
+    #[test]
+    fn web_login_fields_must_be_filled_and_name_what_the_recipe_declares() {
+        let errs = with(|v| v["connection"]["webLogin"]["password"] = Value::String(" ".into()));
+        assert_eq!(pointers(&errs), vec!["/connection/webLogin/password"]);
+        assert!(errs[0].message.contains("{secrets.webPassword}"), "the fix is in the message: {errs:?}");
+
+        let errs = with(|v| v["connection"]["webLogin"]["password"] = Value::String("{secrets.webPasswrd}".into()));
+        assert_eq!(pointers(&errs), vec!["/connection/webLogin/password"]);
+
+        let errs = with(|v| {
+            v["connection"].as_object_mut().unwrap().remove("webLogin");
+        });
+        assert!(errs.is_empty(), "webLogin is optional: {errs:?}");
     }
 
     #[test]

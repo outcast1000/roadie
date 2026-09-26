@@ -215,6 +215,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/v1/owner/recipes/{name}/trust", post(owner_trust))
         .route("/v1/owner/tools/{name}/install", post(owner_install))
         .route("/v1/owner/tools/{name}", delete(owner_uninstall))
+        .route("/v1/owner/tools/{name}/web-login", get(owner_web_login))
         .route("/v1/owner/intent", post(owner_intent))
         .route("/v1/owner/settings", get(owner_get_settings).put(owner_put_settings))
         .layer(middleware::from_fn(require_owner));
@@ -500,6 +501,16 @@ async fn owner_uninstall(AxumPath(name): AxumPath<String>, Query(q): Query<HashM
     match blocking(move || actions::uninstall_now(&name, keep_data)).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => err(StatusCode::CONFLICT, e),
+    }
+}
+
+/// The tool's web-page sign-in, for the window's "Show login". Owner-only:
+/// it is a secret, and the bearer token does not open owner routes.
+async fn owner_web_login(AxumPath(name): AxumPath<String>) -> Response {
+    match tokio::task::spawn_blocking(move || intake::owner_web_login(&name)).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(r)) => refusal(r),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("task failed: {e}")),
     }
 }
 
@@ -1142,6 +1153,24 @@ mod tests {
 
         let resp = app.clone().oneshot(req("PATCH", "/v1/tools/slskd/config", Some(TOKEN), Some(r#"{"nope":1}"#))).await.unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn web_login_is_flagged_in_status_and_only_the_owner_reads_it() {
+        let app = setup();
+        let resp = app.clone().oneshot(req("GET", "/v1/tools/slskd", None, None)).await.unwrap();
+        let v = json_of(resp).await;
+        assert_eq!(v["hasWebLogin"], true);
+        assert!(v.get("webLogin").is_none(), "status never carries the login: {v}");
+
+        let path = "/v1/owner/tools/slskd/web-login";
+        let resp = app.clone().oneshot(req("GET", path, Some(TOKEN), None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "the bearer token does not open owner routes");
+        let owner_token = owner::register_for_test();
+        let resp = app.clone().oneshot(owner_req("GET", path, Some(&owner_token), None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "not installed in the test root: nothing to sign in to");
+        let resp = app.clone().oneshot(owner_req("GET", "/v1/owner/tools/yt-dlp/web-login", Some(&owner_token), None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "yt-dlp isn't installed either");
     }
 
     #[tokio::test]

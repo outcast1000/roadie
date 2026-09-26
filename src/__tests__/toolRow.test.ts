@@ -30,6 +30,7 @@ const base: ToolRow = {
   url: "http://127.0.0.1:5030",
   binPath: null,
   connectionPolicy: "perConsumerKey",
+  hasWebLogin: true,
   approvedConsumers: [],
   config: {},
   details: {},

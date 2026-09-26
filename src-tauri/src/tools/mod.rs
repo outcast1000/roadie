@@ -99,6 +99,9 @@ pub struct ToolStatus {
     /// Cli tools: the stable path consumers should run.
     pub bin_path: Option<String>,
     pub connection_policy: ConnectionPolicy,
+    /// The recipe declares a `connection.webLogin`. The login itself is a
+    /// secret and comes only from the owner route / an approved connection.
+    pub has_web_login: bool,
     pub approved_consumers: Vec<String>,
     /// Non-secret config values plus `has_<key>` for secret fields.
     pub config: Map<String, Value>,
@@ -152,6 +155,20 @@ fn build_ctx(recipe: &Recipe, st: &ToolState, p: &ToolPaths) -> Result<Ctx, Stri
         ctx.connection_url = Some(template::expand_string(&c.url, &ctx)?);
     }
     Ok(ctx)
+}
+
+/// The recipe's `connection.webLogin`, expanded against the tool's state:
+/// `Ok(None)` when the recipe declares none. A secret — callers decide who
+/// may see it (the owner, an approved consumer), status never carries it.
+pub fn web_login(recipe: &Recipe) -> Result<Option<Value>, String> {
+    let Some(w) = recipe.connection.as_ref().and_then(|c| c.web_login.as_ref()) else { return Ok(None) };
+    let p = paths::tool_paths(&recipe.name)?;
+    let st = state::load(&p.data);
+    let ctx = build_ctx(recipe, &st, &p)?;
+    Ok(Some(serde_json::json!({
+        "username": template::expand_string(&w.username, &ctx)?,
+        "password": template::expand_string(&w.password, &ctx)?,
+    })))
 }
 
 fn probe_health(recipe: &Recipe, ctx: &Ctx) -> Health {
@@ -338,6 +355,7 @@ pub fn status(recipe: &Recipe) -> ToolStatus {
         url: ctx.as_ref().and_then(|c| c.connection_url.clone()),
         bin_path,
         connection_policy: recipe.connection.as_ref().map(|c| c.policy).unwrap_or(ConnectionPolicy::None),
+        has_web_login: recipe.connection.as_ref().is_some_and(|c| c.web_login.is_some()),
         approved_consumers: consent::consumers_for(&recipe.name).into_iter().map(|c| c.id).collect(),
         config: state::public_config(recipe, &st),
         details: lv.details,
@@ -376,6 +394,7 @@ fn unavailable(recipe: &Recipe, supported: bool) -> ToolStatus {
         url: None,
         bin_path: None,
         connection_policy: ConnectionPolicy::None,
+        has_web_login: false,
         approved_consumers: vec![],
         config: Map::new(),
         details: Map::new(),

@@ -478,6 +478,19 @@ main {
   white-space: nowrap;
 }
 
+.web-login {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 10px;
+  gap: 8px;
+}
+.web-login code {
+  user-select: all;
+}
+
 .prompts {
   display: flex;
   flex-direction: column;

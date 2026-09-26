@@ -27,7 +27,7 @@ built-in example. Copy the closest built-in and edit it.
 | `secrets` | `[ { key, generate: "hex<N>" } ]` | generated once, stored in state, available as `{secrets.key}` |
 | `ports` | `{ name: { default, pick } }` | daemon only; `pick: true` scans `default+1..+10` when the default is taken by something else |
 | `config` | `[ ConfigField ]` | user-editable values (below) |
-| `connection` | `{ policy, minLen, maxLen, url }` | `policy`: `none` \| `open` \| `perConsumerKey` |
+| `connection` | `{ policy, minLen, maxLen, url, webLogin }` | `policy`: `none` \| `open` \| `perConsumerKey`. `webLogin` (optional): `{ username, password }` for the tool's own web page, placeholders allowed (below) |
 | `createDirs` | `[ string ]` | created before start (tools that refuse a missing directory) |
 | `files` | `[ FileDef ]` | config files written before every start |
 | `run` | `{ args, env, cwd, startupGraceSec }` | daemon only, required |
@@ -98,6 +98,12 @@ An install request may also name a registered `consumer`
 (`{ "config": {…}, "consumer": "<id>" }`): the one approval then installs the tool *and* grants
 that app its connection key, so it can read `/v1/tools/<name>/connection?consumer=<id>` as soon as
 the request is `done`. Only for tools with a `connection`; the consumer must already be registered.
+
+A `connection.webLogin` is the sign-in for the tool's own web page when the recipe put one
+behind generated credentials (slskd's web UI: `{ "username": "roadie", "password":
+"{secrets.webPassword}" }`). It is expanded like `url` and returned as `webLogin` alongside the
+key in `/v1/tools/<name>/connection` — to an approved consumer and to the owner — so a person can
+open the page. It is never part of a tool's status. Both fields must be non-empty.
 
 Two decisions belong to the engine rather than to a config field, and use reserved keys in the
 same `config` object: `startNow` (start the daemon as soon as it is installed) and `autostart`

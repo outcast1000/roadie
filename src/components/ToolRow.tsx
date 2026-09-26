@@ -80,6 +80,9 @@ interface Props {
 export function ToolRow({ tool: t, recipe, tools, highlighted, onReview, onRevoke, dryRun }: Props) {
   const [showConfig, setShowConfig] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
+  // Fetched on the click, never kept in status: it is the web page's password.
+  const [webLogin, setWebLogin] = useState<{ username: string; password: string } | null>(null);
+  const [webLoginError, setWebLoginError] = useState<string | null>(null);
   const [logText, setLogText] = useState("");
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [askingInstall, setAskingInstall] = useState(false);
@@ -240,6 +243,26 @@ export function ToolRow({ tool: t, recipe, tools, highlighted, onReview, onRevok
             Open web UI
           </button>
         ) : null}
+        {t.installed && t.hasWebLogin ? (
+          <button
+            className="ghost"
+            onClick={() => {
+              if (webLogin) {
+                setWebLogin(null);
+                return;
+              }
+              setWebLoginError(null);
+              invoke<{ username: string; password: string }>("tool_web_login", { name: t.name })
+                .then(setWebLogin)
+                .catch((e) => {
+                  console.error("Failed to read the web login:", e);
+                  setWebLoginError(String(e));
+                });
+            }}
+          >
+            {webLogin ? "Hide login" : "Show login"}
+          </button>
+        ) : null}
         {t.installed && daemon ? (
           <button className="ghost" onClick={() => setShowLogs((s) => !s)}>
             {showLogs ? "Hide log" : "Log"}
@@ -333,6 +356,17 @@ export function ToolRow({ tool: t, recipe, tools, highlighted, onReview, onRevok
         />
       ) : null}
 
+      {webLogin ? (
+        <div className="web-login">
+          <span>
+            Web UI login: user <code>{webLogin.username}</code> · password <code>{webLogin.password}</code>
+          </span>
+          <button className="ghost small" onClick={() => void navigator.clipboard.writeText(webLogin.password).catch((e) => console.error("Failed to copy the password:", e))}>
+            Copy password
+          </button>
+        </div>
+      ) : null}
+      {webLoginError ? <div className="error">Couldn't read the login: {webLoginError}</div> : null}
       {showLogs ? (
         <div className="log">
           <div className="log-head">
