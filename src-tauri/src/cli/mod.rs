@@ -79,7 +79,7 @@ mod const_format_usage {
     );
     #[allow(dead_code)]
     pub const CLI: &str = usage!(
-        "  roadie tool connection <tool> --consumer <id>   (its URL and that app's key; asks the user once)\n  roadie tool autostart <tool> on|off\n  roadie tool logs <tool> [--lines n]\n  roadie maintain                  (start the 'start at login' daemons, daily updates; run at login)\n",
+        "  roadie tool connection <tool> --consumer <id>   (its URL and that app's key; asks the user once)\n  roadie tool autostart <tool> on|off\n  roadie tool logs <tool> [--lines n]\n  roadie maintain                  (start the 'start at login' daemons, daily updates; apps run it on launch)\n",
         "options: --data-dir <dir>   (default: this CLI's own data dir; an app bundling Roadie passes its own)\n         --as <app name>    what the prompt says asked (default: roadie CLI)\n"
     );
 }

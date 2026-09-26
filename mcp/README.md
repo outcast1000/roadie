@@ -36,7 +36,7 @@ is, and `launch_app` starts the installed app and waits for its API.
 
 The server finds Roadie through `roadie-api.json` in the app's data directory
 (`~/Library/Application Support/com.outcast1000.roadie` on macOS, `%APPDATA%\com.outcast1000.roadie`
-on Windows, `~/.local/share/com.outcast1000.roadie` on Linux). Pass `--data-dir=<dir>` to override.
+on Windows). Pass `--data-dir=<dir>` to override.
 
 ## Tools
 

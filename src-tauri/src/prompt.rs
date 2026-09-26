@@ -4,7 +4,7 @@
 //!   window, which shows `RequestPrompt` (`service::open_window_if_needed`).
 //! - **Dialog**: the CLI release shows a native yes/no dialog from its own
 //!   process (`cli/local.rs`): `osascript` on macOS, `MessageBoxW` on
-//!   Windows, `zenity` or `kdialog` on Linux, and acts on the answer.
+//!   Windows, and acts on the answer.
 //! - **Terminal**: no screen at all (SSH, a headless box). The CLI prompts
 //!   on its TTY. In the desktop release it then approves over the owner
 //!   channel, which mints a *terminal* token only in this case (`owner.rs`).
@@ -16,8 +16,6 @@
 //! be (macOS: the security session's graphic access; Windows: whether the
 //! window station is visible), because a program that restarts the service
 //! with a doctored environment must not be able to downgrade it to Terminal.
-//! Linux has no such check; `DISPLAY`/`WAYLAND_DISPLAY` decide, and the same
-//! program could drive an X11 dialog anyway, exactly as it could the window.
 
 use crate::recipe::store::{self, Change};
 use crate::recipe::{self, ConfigField, Recipe, Source};
@@ -98,8 +96,8 @@ impl Prompt {
 }
 
 /// Text a client chose (its name, config values) is shown, never
-/// interpreted: no control or bidi-override characters, no `<`/`>` (kdialog
-/// renders anything that looks like HTML), one line, bounded.
+/// interpreted: no control or bidi-override characters, no `<`/`>` (nothing
+/// that looks like markup), one line, bounded.
 pub fn clean(s: &str, max: usize) -> String {
     let t: String = s
         .chars()
@@ -452,11 +450,6 @@ pub mod screen {
             ok != 0 && f.flags & WSF_VISIBLE != 0
         }
     }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    pub fn available() -> bool {
-        ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
-    }
 }
 
 // --- Native dialogs ---
@@ -472,7 +465,7 @@ pub mod dialog {
         Dismissed,
     }
 
-    /// Seconds a dialog waits before giving up (macOS and zenity).
+    /// Seconds the macOS dialog waits before giving up.
     pub const GIVE_UP_SECS: u32 = 600;
 
     /// The AppleScript run by `osascript`. Every word the user reads comes
@@ -508,85 +501,12 @@ pub mod dialog {
         }
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum LinuxTool {
-        Zenity,
-        Kdialog,
-    }
-
-    /// Arguments for zenity or kdialog. zenity gets `--no-markup`; kdialog
-    /// has no such switch, which is why `clean` strips `<` and `>`.
-    pub fn linux_args(tool: LinuxTool, p: &Prompt) -> Vec<String> {
-        let text = p.text();
-        match (tool, &p.approve) {
-            (LinuxTool::Zenity, Some(label)) => vec![
-                "--question".into(),
-                "--title=Roadie".into(),
-                "--no-markup".into(),
-                "--width=460".into(),
-                format!("--timeout={GIVE_UP_SECS}"),
-                format!("--ok-label={label}"),
-                "--cancel-label=Decline".into(),
-                format!("--text={text}"),
-            ],
-            (LinuxTool::Zenity, None) => vec![
-                "--warning".into(),
-                "--title=Roadie".into(),
-                "--no-markup".into(),
-                "--width=460".into(),
-                format!("--timeout={GIVE_UP_SECS}"),
-                "--ok-label=Decline".into(),
-                format!("--text={text}"),
-            ],
-            (LinuxTool::Kdialog, Some(label)) => vec![
-                "--title".into(),
-                "Roadie".into(),
-                "--yes-label".into(),
-                label.clone(),
-                "--no-label".into(),
-                "Decline".into(),
-                "--yesno".into(),
-                text,
-            ],
-            (LinuxTool::Kdialog, None) => vec!["--title".into(), "Roadie".into(), "--sorry".into(), format!("{text}\n\nClosing this declines the request.")],
-        }
-    }
-
-    /// zenity: 0 the OK button, 1 Cancel *or* the window closed, 5 timeout.
-    /// kdialog: 0 yes, 1 no. A blocked prompt's only button declines.
-    pub fn linux_answer(tool: LinuxTool, code: Option<i32>, can_approve: bool) -> Answer {
-        match (tool, code, can_approve) {
-            (_, Some(0), true) => Answer::Approve,
-            (_, Some(0), false) => Answer::Decline,
-            (LinuxTool::Kdialog, Some(_), false) => Answer::Decline,
-            (_, Some(1), true) => Answer::Decline,
-            _ => Answer::Dismissed,
-        }
-    }
-
-    /// Absolute paths only: a program that restarts the service with its
-    /// own `PATH` must not substitute a "zenity" that exits 0.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    fn linux_tool() -> Option<(LinuxTool, &'static str)> {
-        const CANDIDATES: &[(LinuxTool, &str)] = &[
-            (LinuxTool::Zenity, "/usr/bin/zenity"),
-            (LinuxTool::Zenity, "/bin/zenity"),
-            (LinuxTool::Zenity, "/run/current-system/sw/bin/zenity"),
-            (LinuxTool::Kdialog, "/usr/bin/kdialog"),
-            (LinuxTool::Kdialog, "/bin/kdialog"),
-            (LinuxTool::Kdialog, "/run/current-system/sw/bin/kdialog"),
-        ];
-        CANDIDATES.iter().copied().find(|(_, p)| std::path::Path::new(p).is_file())
-    }
-
     /// Can this OS show our dialog at all (given a screen)?
     pub fn available() -> bool {
         #[cfg(target_os = "macos")]
         return std::path::Path::new("/usr/bin/osascript").is_file();
         #[cfg(windows)]
         return true;
-        #[cfg(all(unix, not(target_os = "macos")))]
-        return linux_tool().is_some();
     }
 
     /// Show `p` and block until it is answered, dismissed or times out.
@@ -606,18 +526,6 @@ pub mod dialog {
                 return Err(format!("osascript exited {}: {}", out.status, String::from_utf8_lossy(&out.stderr).trim()));
             }
             Ok(mac_answer(&String::from_utf8_lossy(&out.stdout), p.approve.as_deref()))
-        }
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            let (tool, path) = linux_tool().ok_or("neither zenity nor kdialog is installed")?;
-            let status = std::process::Command::new(path)
-                .args(linux_args(tool, p))
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map_err(|e| format!("run {path}: {e}"))?;
-            Ok(linux_answer(tool, status.code(), p.approve.is_some()))
         }
         #[cfg(windows)]
         {
@@ -722,7 +630,7 @@ mod tests {
         assert!(p.approve.is_none(), "{p:?}");
         let blocked = p.blocked.as_deref().unwrap();
         assert!(blocked.contains("soulseekUsername") && blocked.contains("--set key=value"), "names the missing key: {blocked}");
-        assert!(!p.text().contains('<'), "no markup-looking text for kdialog: {}", p.text());
+        assert!(!p.text().contains('<'), "no markup-looking text: {}", p.text());
 
         // Everything supplied: approvable, secrets never shown.
         let mut config = Map::new();
@@ -833,15 +741,6 @@ mod tests {
         assert_eq!(dialog::mac_answer("\n", Some("Install")), dialog::Answer::Dismissed, "gave up");
         assert_eq!(dialog::mac_answer("Install\n", None), dialog::Answer::Dismissed, "a blocked prompt cannot approve");
 
-        let z = dialog::linux_args(dialog::LinuxTool::Zenity, &p);
-        assert!(z.contains(&"--no-markup".to_string()) && z.contains(&"--ok-label=Install".to_string()));
-        use dialog::{linux_answer, Answer, LinuxTool::*};
-        assert_eq!(linux_answer(Zenity, Some(0), true), Answer::Approve);
-        assert_eq!(linux_answer(Zenity, Some(1), true), Answer::Decline);
-        assert_eq!(linux_answer(Zenity, Some(5), true), Answer::Dismissed, "timeout");
-        assert_eq!(linux_answer(Zenity, Some(0), false), Answer::Decline, "a blocked prompt's button declines");
-        assert_eq!(linux_answer(Kdialog, Some(1), false), Answer::Decline);
-        assert_eq!(linux_answer(Zenity, None, true), Answer::Dismissed, "killed");
         assert!(dialog::windows_text(&p).contains("Yes: install."));
     }
 }

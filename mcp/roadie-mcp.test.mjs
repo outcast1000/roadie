@@ -27,7 +27,6 @@ function fakeFetch(port, routes = {}) {
 test("default data dir follows the OS conventions", () => {
   assert.equal(defaultDataDir("darwin", "/Users/a", {}), "/Users/a/Library/Application Support/com.outcast1000.roadie");
   assert.equal(defaultDataDir("win32", "C:\\Users\\a", { APPDATA: "C:\\Users\\a\\AppData\\Roaming" }), "C:\\Users\\a\\AppData\\Roaming\\com.outcast1000.roadie");
-  assert.equal(defaultDataDir("linux", "/home/a", {}), "/home/a/.local/share/com.outcast1000.roadie");
 });
 
 test("discovery: missing file, stale file, good file", async () => {
@@ -120,5 +119,5 @@ test("MCP framing: initialize, tools/list, unknown method, not-running error", a
 
 test("launch command per platform", () => {
   assert.deepEqual(launchCommand("darwin"), ["open", ["-a", "Roadie"]]);
-  assert.equal(launchCommand("linux")[0], "xdg-open");
+  assert.equal(launchCommand("win32")[0], "cmd");
 });

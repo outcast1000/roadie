@@ -139,7 +139,11 @@ export function InstallPlan({ recipe: r, dryRun }: Props) {
           <dd>
             <span className="muted">
               No system-wide install, nothing outside Roadie's data folder and the folders listed here.
-              {r.kind === "daemon" ? " No login item of its own: if you tick \"start at login\" below, Roadie's background service starts it." : " No login item."}
+              {r.kind !== "daemon"
+                ? " No login item."
+                : dry.platform.startsWith("windows")
+                  ? " No login item of its own: if you tick \"start at login\" below, Roadie starts it when you log in."
+                  : " No login item unless you tick \"start at login\" below; then it gets one of its own, which your system lists under the tool's name."}
             </span>
           </dd>
         </dl>

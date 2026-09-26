@@ -28,9 +28,9 @@ const CLIENT_HEADER = "MCP client";
 export function defaultDataDir(platform = process.platform, home = os.homedir(), env = process.env) {
   // Join with the target platform's separator, not the host's, so the answer is the same wherever it is computed.
   const p = platform === "win32" ? path.win32 : path.posix;
+  // Roadie runs on macOS and Windows only.
   if (platform === "darwin") return p.join(home, "Library", "Application Support", IDENTIFIER);
-  if (platform === "win32") return p.join(env.APPDATA || p.join(home, "AppData", "Roaming"), IDENTIFIER);
-  return p.join(env.XDG_DATA_HOME || p.join(home, ".local", "share"), IDENTIFIER);
+  return p.join(env.APPDATA || p.join(home, "AppData", "Roaming"), IDENTIFIER);
 }
 
 function argValue(name) {
@@ -138,8 +138,7 @@ export function redact(value, keep = false) {
 
 export function launchCommand(platform = process.platform) {
   if (platform === "darwin") return ["open", ["-a", "Roadie"]];
-  if (platform === "win32") return ["cmd", ["/c", "start", "", "roadie://open"]];
-  return ["xdg-open", ["roadie://open"]];
+  return ["cmd", ["/c", "start", "", "roadie://open"]];
 }
 
 async function launchApp(api) {
@@ -169,7 +168,7 @@ export const TOOLS = [
   { name: "stop_tool", description: "Stop a running daemon gracefully (API route, then signal).", inputSchema: { type: "object", properties: { name: str("Tool name") }, required: ["name"] } },
   { name: "restart_tool", description: "Stop then start a daemon.", inputSchema: { type: "object", properties: { name: str("Tool name") }, required: ["name"] } },
   { name: "update_tool", description: "Fetch and stage the latest release of an installed tool; applied at once when the daemon is stopped or idle, otherwise deferred (see updateDeferredReason). With `recipe` (the recipe your app ships) that differs from the one Roadie trusts, nothing runs yet: it returns a requestId for the user to review and trust the new recipe, and approving updates the tool. Poll request_status.", inputSchema: { type: "object", properties: { name: str("Tool name"), recipe: { type: "object", description: "Optional: the full recipe your app ships for this tool (same name). Identical to the trusted one: a plain update.", additionalProperties: true } }, required: ["name"] } },
-  { name: "set_autostart", description: "Start a daemon at login (a per-user login item), or not.", inputSchema: { type: "object", properties: { name: str("Tool name"), enabled: bool("true to start at login") }, required: ["name", "enabled"] } },
+  { name: "set_autostart", description: "Start a daemon at login, or not (macOS: the daemon gets a per-user login item of its own; Windows: Roadie starts it at login).", inputSchema: { type: "object", properties: { name: str("Tool name"), enabled: bool("true to start at login") }, required: ["name", "enabled"] } },
   { name: "configure_tool", description: "Set non-secret config fields (see tool_status → config and the recipe's config list). Secret fields (passwords) must be entered by the user in Roadie. A running daemon is restarted when idle, else marked restartPending.", inputSchema: { type: "object", properties: { name: str("Tool name"), patch: { type: "object", description: "Field key → value", additionalProperties: true } }, required: ["name", "patch"] } },
   { name: "tool_logs", description: "Last lines of a daemon's stdout/stderr log.", inputSchema: { type: "object", properties: { name: str("Tool name"), lines: { type: "integer", description: "How many lines (default 100, max 2000)" } }, required: ["name"] } },
   { name: "get_connection", description: "A daemon's base URL (and, only with includeSecret=true, its API key) so you can configure another client. Without includeSecret the key is redacted — prefer telling the user where to approve the consuming app in Roadie.", inputSchema: { type: "object", properties: { name: str("Tool name"), includeSecret: bool("Return the API key in clear (it will be in the transcript)") }, required: ["name"] } },

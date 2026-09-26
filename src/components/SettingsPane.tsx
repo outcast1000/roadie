@@ -74,9 +74,11 @@ export function SettingsPane({ consumers, onRevoke }: Props) {
           Run in the background
         </label>
         <p className="muted">
-          On: Roadie's service starts when you log in and keeps running when this window is closed, so other apps and assistants can reach the local API, tools marked
-          "start at login" are started, and daily updates happen. Off: Roadie behaves like a plain app; the service stops a few seconds after you close this window and
-          nothing starts at login. Tools you started keep running either way.
+          On: Roadie's service starts when you log in and keeps running when this window is closed, so other apps and assistants can reach the local API and daily
+          updates happen. Off: Roadie behaves like a plain app; the service stops a few seconds after you close this window. Tools you started keep running either way.
+          {info?.platform.startsWith("windows")
+            ? " Tools marked \"start at login\" are started by the service, so only while this is on."
+            : " Tools marked \"start at login\" have login items of their own and start either way."}
         </p>
         {info?.service ? (
           <p className="muted">

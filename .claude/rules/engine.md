@@ -27,11 +27,21 @@ there first.
   CREATE_NEW_PROCESS_GROUP` — a *hidden* console so Ctrl-Break has something to attach to),
   `is_ours` (exe path under the versions dir), the stop ladder `stop()`, `log_tail`, hand-declared
   kernel32 FFI.
-- **tools/autostart.rs** — the **service's** login item (`roadie --serve --data-dir <dir>`,
-  label `com.outcast1000.roadie.service`): LaunchAgent plist (`KeepAlive false`,
-  `AbandonProcessGroup true`), HKCU `Run` via `reg.exe`, XDG `.desktop`. A tool's "start at
-  login" is `ToolState.autostart`, acted on by `reconcile()` at service start; per-tool items
-  from older builds are removed when seen.
+- **tools/autostart.rs** — login items, hand-rolled (LaunchAgent plist, HKCU `Run` via
+  `reg.exe`). **A daemon's own item** (`tool-<name>`, macOS only, `NATIVE_TOOL_ITEMS`): runs `launch_plan()` — the binary of the current version, expanded
+  args, env, cwd, output appended to `stdout.log`; `KeepAlive false` so Stop sticks. Written
+  only when it changed and **never bootstrapped** (a `RunAtLoad` load would start a second copy
+  now), removed as a file only (a `bootout` would stop the running daemon). `tool_item_pid`
+  reads `launchctl list <label>` so liveness can adopt a daemon launchd started and write its
+  pid file. Also: the **service's** item (`roadie --serve`, `com.outcast1000.roadie.service`),
+  the CLI's `maintain` item (Windows only; on macOS every CLI command removes it after syncing
+  the daemons' items), and the `--start-tool` items of older builds, removed when seen.
+  Item names get a `-<hash>` suffix for a non-default data dir.
+- **Login-item sync** (`tools::sync_login_item`, under the tool's lock): after install,
+  set_autostart, start (ports), apply_pending (version), configure, and in reconcile; uninstall
+  removes the item. At login (`reconcile_with(.., at_login = true)`) a daemon with its own item
+  is launchd's to start; Roadie starts it only when no item existed yet (the first login after
+  an upgrade) or on Windows.
 - **tools/state.rs** — `state.json` (`ToolState`): ports, secrets, config, flags.
   `load_or_init` mints `secrets[]`, fills port defaults and expands config defaults;
   `apply_patch` validates against `recipe.config` (password `""` clears, absent keeps).
@@ -50,6 +60,9 @@ there first.
 
 ## Invariants
 
+- **macOS and Windows only.** Every OS-specific path has exactly a `target_os = "macos"` (or
+  `unix`, which means the same thing — `lib.rs` has a `compile_error!` for anything else) and a
+  `windows` branch. Never add a Linux or "other unix" fallback.
 - **Per-tool lock** around every mutation (`lock(name)`); reads (`status`) are lock-free. It
   is an in-process mutex plus a file lock in `<data>/locks/<name>.lock` (`paths::lock_file`,
   `flock` / `LockFileEx`), because CLI-release runs are separate processes. Never nest it.

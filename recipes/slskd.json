@@ -3,14 +3,14 @@
   "name": "slskd",
   "displayName": "slskd",
   "author": "Roadie",
-  "revision": 3,
+  "revision": 4,
   "summary": "Soulseek client with a web UI and HTTP API. Music apps use it to search and download from the Soulseek network.",
   "homepage": "https://github.com/slskd/slskd",
   "license": "AGPL-3.0",
   "notes": "slskd is a machine-wide singleton: a copy you run yourself blocks this one. The web UI stays on, bound to 127.0.0.1, behind generated credentials — that is what gives every OS a graceful stop.",
   "kind": "daemon",
 
-  "platforms": ["darwin-arm64", "darwin-x64", "windows-x64", "windows-arm64", "linux-x64"],
+  "platforms": ["darwin-arm64", "darwin-x64", "windows-x64", "windows-arm64"],
   "startAfterInstall": { "default": true, "askOnInstall": true },
   "autostart": { "default": true, "askOnInstall": true },
   "source": {
@@ -21,8 +21,7 @@
       "darwin-arm64": "slskd-{version}-osx-arm64.zip",
       "darwin-x64": "slskd-{version}-osx-x64.zip",
       "windows-x64": "slskd-{version}-win-x64.zip",
-      "windows-arm64": "slskd-{version}-win-arm64.zip",
-      "linux-x64": "slskd-{version}-linux-x64.zip"
+      "windows-arm64": "slskd-{version}-win-arm64.zip"
     },
     "checksums": { "kind": "none" }
   },

@@ -190,8 +190,7 @@ fn open_return(base: &str, status: &str, tool: &str) {
     }
 }
 
-/// Hand a URL to the OS's default handler (no crate: `open`, `xdg-open`,
-/// `rundll32`). Only custom-scheme and http(s) URLs are accepted.
+/// Hand a URL to the OS's default handler (no crate: `open`, `rundll32`). Only custom-scheme and http(s) URLs are accepted.
 pub fn open_url(url: &str) -> Result<(), String> {
     let ok = url.split_once("://").is_some_and(|(scheme, _)| !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.'));
     if !ok {
@@ -207,12 +206,6 @@ pub fn open_url(url: &str) -> Result<(), String> {
     let mut cmd = {
         let mut c = std::process::Command::new("rundll32");
         c.args(["url.dll,FileProtocolHandler", url]);
-        c
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(url);
         c
     };
     let status = cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map_err(|e| format!("open {url}: {e}"))?;

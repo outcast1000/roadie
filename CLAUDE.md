@@ -20,6 +20,11 @@ frontend) ships as **two independent releases**, selected by cargo features:
   Apps can bundle it as a private component with their own `--data-dir` and ship its updates.
 
 The two never coordinate. If a user installs both, keeping them apart is the user's business.
+
+**Platforms: macOS and Windows only.** Roadie does not support Linux and must not grow Linux code:
+no `cfg(target_os = "linux")` / `all(unix, not(target_os = "macos"))` branches, no XDG paths or
+autostart entries, no zenity/kdialog, no AppImage/deb bundles, no `linux-*` recipe platforms.
+`lib.rs` refuses to compile for any other OS, so `cfg(unix)` means macOS.
 Asks are checked by the same code in both (`intake.rs`), so they refuse the same things.
 
 Roadie was created so that the music player Viboplr (`outcast1000/viboplr`) would not install or
@@ -46,12 +51,18 @@ Viboplr-specific code paths. Viboplr is one consumer among any.
    *updates* of installed tools are allowed (on by default, toggleable) but never restart a busy
    daemon (`busy` check, staged versions).
 3. **Daemons are independent and loopback-only.** They outlive Roadie (detached, `setsid` /
-   hidden console), bind `127.0.0.1`, stop through a ladder (recipe API route → SIGTERM or
-   Ctrl-Break → kill), and start at login only because Roadie starts them in its reconcile
-   (`ToolState.autostart`). There is one login item per data dir and it is Roadie's own, never a
-   daemon's path: the service (`roadie --serve --data-dir <dir>`) in the desktop release, and
-   `roadie --data-dir <dir> maintain --at-login` in the CLI release, kept in step by every CLI
-   command while any tool starts at login.
+   hidden console), bind `127.0.0.1`, and stop through a ladder (recipe API route → SIGTERM or
+   Ctrl-Break → kill). **"Start at login" is the daemon's own login item** on macOS
+   (`tool-<name>`: a LaunchAgent running the daemon's binary with exactly the
+   command Roadie would start it with), so the OS names the tool and its Login Items switch is
+   that tool's. The engine derives the item from `ToolState` and rewrites it on every change of
+   version, ports, config or the flag (`tools::sync_login_item`); it is written, never loaded
+   into launchd mid-session (that would start a second copy). A daemon its item started has no
+   pid file; liveness adopts it through `launchctl list`. **Windows** keeps Roadie's own item
+   (a Run value starting a console daemon would open a console window at every login): the
+   reconcile starts the tools, from the service in the desktop release and from
+   `roadie --data-dir <dir> maintain --at-login` in the CLI release. The service's own item
+   (`roadie --serve`) follows "Run in the background" on every platform.
 4. **Only the user's own screen can act as the user.** Desktop: approving a request, trusting
    a draft, the card's Install/Remove and settings are **owner routes** (`/v1/owner/*`). The
    bearer token does not open them. An owner token comes only from the **owner channel**
@@ -59,9 +70,8 @@ Viboplr-specific code paths. Viboplr is one consumer among any.
    Roadie binary. This keeps rule 2 true against other programs running as the same user. CLI
    release: the dialog comes from the CLI's own process (`prompt::dialog`), with its text passed
    as arguments, never as script. A terminal is asked only on a machine with no screen, because a
-   program can drive the CLI through a pseudo-terminal it controls. Known limit: the program
-   that runs the CLI is its parent, and on Linux a parent may ptrace its child. There is no
-   `--yes`, ever.
+   program can drive the CLI through a pseudo-terminal it controls. There is no `--yes`,
+   ever.
 
 ## Build, run, test
 
@@ -101,7 +111,8 @@ cd src-tauri && cargo test --no-default-features --target-dir target/cli        
   when no window ever connected (plain-app mode). A request that needs the user while no window
   is connected makes the service open one (`service::open_window_if_needed`).
 - The service's login item is `com.outcast1000.roadie.service` for the default data dir and
-  `…service-<hash>` for any other, so a `--data-dir` sandbox never touches the real item. The
+  `…service-<hash>` for any other, so a `--data-dir` sandbox never touches the real item. A
+  daemon's own item is `com.outcast1000.roadie.tool-<name>` (`…-<hash>` likewise). The
   window accepts `--data-dir` too (the service passes it when opening a window for a sandbox).
   `ROADIE_IDLE_EXIT_SECS` shortens the plain-app idle exit (tests use 4).
 - Tauri's single-instance plugin means one window per user: a second launch is forwarded to
@@ -119,10 +130,9 @@ cd src-tauri && cargo test --no-default-features --target-dir target/cli        
   RELEASING.md), so a release may add commands, flags and JSON fields but never rename, remove or
   repurpose one.
 - Where a request is shown is `prompt::surface()`: `window` in the desktop release (also
-  `approvalSurface` in `/v1/health`), `dialog` in the CLI release (osascript / MessageBoxW /
-  zenity or kdialog, text passed as arguments, never as script), `terminal` when the OS says
-  there is no screen (macOS session graphic access, Windows visible window station, Linux
-  `DISPLAY`/`WAYLAND_DISPLAY`).
+  `approvalSurface` in `/v1/health`), `dialog` in the CLI release (osascript / MessageBoxW,
+  text passed as arguments, never as script), `terminal` when the OS says there is no screen
+  (macOS session graphic access, Windows visible window station).
 - Driving the running app from a shell: read the token from `roadie-api.json` and curl
   `127.0.0.1:47630` — or speak MCP to `mcp/roadie-mcp.mjs` over stdio, as a client would.
 
@@ -155,7 +165,8 @@ cd src-tauri && cargo test --no-default-features --target-dir target/cli        
   `state::public_config` and `ToolPublic` are the shapes; `has_<key>` booleans stand in.
 - Call `api.github.com`. Release lookup is `HEAD github.com/<repo>/releases/latest` and reading
   the redirect (`install.rs`), because the API's per-IP budget is exhausted on shared egress.
-- Add crates for convenience. plist, `reg.exe`, `.desktop`, YAML emission and Windows FFI are
+- Add Linux support, or code for any OS other than macOS and Windows (see "Platforms" above).
+- Add crates for convenience. plist, `reg.exe`, YAML emission and Windows FFI are
   all hand-rolled on purpose; `serde_json` has `preserve_order` so emitted files keep the
   recipe author's key order.
 - Add CORS to the API, or accept a `Host` that is not loopback.

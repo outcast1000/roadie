@@ -202,7 +202,8 @@ fn answering(recipe: &Recipe, ctx: &Ctx) -> bool {
 }
 
 /// Where the daemon stands right now: pid file cross-checked against the
-/// binary it runs, plus the recipe's health probe. Cleans a stale pid file.
+/// binary it runs, plus the recipe's health probe. Cleans a stale pid file;
+/// records one for a daemon its login item started.
 fn liveness(recipe: &Recipe, _st: &ToolState, p: &ToolPaths, ctx: &Ctx) -> Liveness {
     let mut lv = Liveness::none();
     if recipe.kind == Kind::Cli {
@@ -213,8 +214,17 @@ fn liveness(recipe: &Recipe, _st: &ToolState, p: &ToolPaths, ctx: &Ctx) -> Liven
     let port_desc = || {
         ctx.connection_url.clone().unwrap_or_else(|| "its port".into())
     };
-    match process::read_pid_file(&p.data) {
-        Some(pf) if process::is_ours(pf.pid, &p.versions) => {
+    let pid_file = match process::read_pid_file(&p.data) {
+        Some(pf) if process::is_ours(pf.pid, &p.versions) => Some(pf),
+        other => {
+            if other.is_some() {
+                process::remove_pid_file(&p.data);
+            }
+            adopt_login_instance(recipe, p)
+        }
+    };
+    match pid_file {
+        Some(pf) => {
             lv.pid = Some(pf.pid);
             lv.running = true;
             match health {
@@ -233,10 +243,7 @@ fn liveness(recipe: &Recipe, _st: &ToolState, p: &ToolPaths, ctx: &Ctx) -> Liven
                 Health::Other(detail) => lv.health_detail = Some(detail),
             }
         }
-        other => {
-            if other.is_some() {
-                process::remove_pid_file(&p.data);
-            }
+        None => {
             match health {
                 Health::Ok { version, details } => {
                     // An instance we did not spawn that still accepts our key.
@@ -573,6 +580,7 @@ pub fn install(recipe: &Recipe, progress: Progress) -> Result<ToolStatus, String
             refresh_shims(recipe, &p, &resolved.version)?;
         }
         state::save(&p.data, &st)?;
+        sync_login_item_logged(recipe, &st, &p);
         install::prune_versions(&p, &[resolved.version.as_str()]);
     } else {
         state::save(&p.data, &st)?;
@@ -623,6 +631,9 @@ fn apply_pending(recipe: &Recipe, st: &mut ToolState, p: &ToolPaths, allow_resta
     }
     st.restart_pending = false;
     state::save(&p.data, st)?;
+    if staged.is_some() {
+        sync_login_item_logged(recipe, st, p);
+    }
     if lv.running {
         start_locked(recipe, st, p, "roadie")?;
     }
@@ -671,22 +682,15 @@ fn start_locked(recipe: &Recipe, st: &mut ToolState, p: &ToolPaths, started_by: 
     let ctx = build_ctx(recipe, st, p)?;
     write_files(recipe, &ctx)?;
 
-    let run = recipe.run.as_ref().ok_or("recipe has no run block")?;
-    let exe = install::binary_path(recipe, p, &version);
-    let plan = process::SpawnPlan {
-        exe: exe.clone(),
-        args: run.args.iter().map(|a| template::expand_string(a, &ctx)).collect::<Result<_, _>>()?,
-        env: run.env.iter().map(|(k, v)| template::expand_string(v, &ctx).map(|v| (k.clone(), v))).collect::<Result<_, _>>()?,
-        cwd: run.cwd.as_ref().map(|c| template::expand_string(c, &ctx).map(PathBuf::from)).transpose()?,
-        log: p.logs.join(process::STDOUT_LOG),
-        append_log: false,
-    };
+    let plan = launch_plan(recipe, &ctx, p, &version)?;
     let pid = process::spawn_detached(&plan)?;
     let started_at = paths::now_secs();
-    process::write_pid_file(&p.data, &process::PidFile { pid, version, exe, started_at, started_by: started_by.to_string() })?;
+    process::write_pid_file(&p.data, &process::PidFile { pid, version, exe: plan.exe.clone(), started_at, started_by: started_by.to_string() })?;
     st.user_stopped = false;
     st.last_start = Some(started_at);
     state::save(&p.data, st)?;
+    // The ports may have moved; the login item starts it with these.
+    sync_login_item_logged(recipe, st, p);
 
     // Wait briefly for health; a pid that dies before answering is how a
     // singleton refusal or a bad config shows itself.
@@ -715,6 +719,85 @@ fn start_locked(recipe: &Recipe, st: &mut ToolState, p: &ToolPaths, started_by: 
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+/// How the daemon is started: by Roadie (`spawn_detached`) and by its own
+/// login item, which must run exactly this.
+fn launch_plan(recipe: &Recipe, ctx: &Ctx, p: &ToolPaths, version: &str) -> Result<process::SpawnPlan, String> {
+    let run = recipe.run.as_ref().ok_or("recipe has no run block")?;
+    Ok(process::SpawnPlan {
+        exe: install::binary_path(recipe, p, version),
+        args: run.args.iter().map(|a| template::expand_string(a, ctx)).collect::<Result<_, _>>()?,
+        env: run.env.iter().map(|(k, v)| template::expand_string(v, ctx).map(|v| (k.clone(), v))).collect::<Result<_, _>>()?,
+        cwd: run.cwd.as_ref().map(|c| template::expand_string(c, ctx).map(PathBuf::from)).transpose()?,
+        log: p.logs.join(process::STDOUT_LOG),
+        append_log: false,
+    })
+}
+
+/// Keep the daemon's own login item in step with its state: present while
+/// "start at login" is on and a version is installed, running the current
+/// version with the args, env and ports it would start with now; gone
+/// otherwise. Unchanged items are left alone, so every mutation calls this.
+/// Callers hold the tool's lock.
+fn sync_login_item(recipe: &Recipe, st: &ToolState, p: &ToolPaths) -> Result<(), String> {
+    // Tests run against the real home folder; a login item is not theirs to write.
+    if !autostart::NATIVE_TOOL_ITEMS || recipe.kind != Kind::Daemon || cfg!(test) {
+        return Ok(());
+    }
+    let root = paths::data_root()?;
+    match install::current_version(recipe, p) {
+        Some(version) if st.autostart => {
+            let mut st = st.clone();
+            st.installed_version = Some(version.clone());
+            let ctx = build_ctx(recipe, &st, p)?;
+            autostart::enable_tool(&recipe.name, root, &launch_plan(recipe, &ctx, p, &version)?)
+        }
+        _ => autostart::disable_tool(&recipe.name, root),
+    }
+}
+
+/// For changes whose own work succeeded: a login item that could not be
+/// rewritten is logged, and the next change tries again.
+fn sync_login_item_logged(recipe: &Recipe, st: &ToolState, p: &ToolPaths) {
+    if let Err(e) = sync_login_item(recipe, st, p) {
+        log::warn!("could not update {}'s login item: {e}", recipe.name);
+    }
+}
+
+/// Bring every daemon's login item in step (the CLI release after each
+/// command: items from an older Roadie, or a data dir that moved).
+pub fn sync_login_items(recipes: &[Recipe]) {
+    for recipe in recipes.iter().filter(|r| r.kind == Kind::Daemon) {
+        let Ok(p) = paths::tool_paths(&recipe.name) else { continue };
+        let _g = lock(&recipe.name);
+        sync_login_item_logged(recipe, &state::load(&p.data), &p);
+    }
+}
+
+/// A daemon its login item started has no pid file; launchd knows its pid.
+/// Recording it lets Stop signal it and keeps a start right after login
+/// (an app running `maintain`) from racing a second copy onto the port.
+fn adopt_login_instance(recipe: &Recipe, p: &ToolPaths) -> Option<process::PidFile> {
+    let root = paths::data_root().ok()?;
+    if !autostart::NATIVE_TOOL_ITEMS || !autostart::tool_enabled(&recipe.name, root) {
+        return None;
+    }
+    let pid = autostart::tool_item_pid(&recipe.name, root)?;
+    if !process::is_ours(pid, &p.versions) {
+        return None;
+    }
+    let pf = process::PidFile {
+        pid,
+        version: install::current_version(recipe, p).unwrap_or_default(),
+        exe: process::pid_exe(pid).unwrap_or_default(),
+        started_at: paths::now_secs(),
+        started_by: "login".into(),
+    };
+    if let Err(e) = process::write_pid_file(&p.data, &pf) {
+        log::warn!("could not record the {} its login item started: {e}", recipe.name);
+    }
+    Some(pf)
 }
 
 fn stop_process(recipe: &Recipe, ctx: &Ctx, pid: Option<u32>) -> Result<process::StopMethod, String> {
@@ -790,8 +873,7 @@ pub fn set_autostart(recipe: &Recipe, enabled: bool) -> Result<ToolStatus, Strin
     let _g = lock(&recipe.name);
     let p = paths::tool_paths(&recipe.name)?;
     let mut st = state::load_or_init(recipe, &p.data, &Platform::current())?;
-    // "Start at login" is a flag the service acts on at its own start; a
-    // per-tool login item from an older Roadie is removed when seen.
+    // A per-tool item from an older Roadie (`roadie --start-tool`) goes.
     if autostart::is_enabled(&recipe.name) {
         if let Err(e) = autostart::disable(&recipe.name) {
             log::warn!("could not remove the old {} login item: {e}", recipe.name);
@@ -802,6 +884,9 @@ pub fn set_autostart(recipe: &Recipe, enabled: bool) -> Result<ToolStatus, Strin
         st.user_stopped = false;
     }
     state::save(&p.data, &st)?;
+    // The daemon's own login item (macOS); on Windows the flag is what
+    // Roadie's reconcile acts on at login.
+    sync_login_item(recipe, &st, &p)?;
     Ok(status(recipe))
 }
 
@@ -818,6 +903,7 @@ pub fn configure(recipe: &Recipe, patch: &Map<String, Value>) -> Result<ToolStat
         write_files(recipe, &ctx)?;
         st.restart_pending = true;
         state::save(&p.data, &st)?;
+        sync_login_item_logged(recipe, &st, &p);
         if !matches!(apply_pending(recipe, &mut st, &p, true)?, ApplyOutcome::Deferred { .. }) {
             st.restart_pending = false;
             state::save(&p.data, &st)?;
@@ -848,6 +934,10 @@ pub fn uninstall(recipe: &Recipe, keep_data: bool) -> Result<(), String> {
             }
         }
         let _ = autostart::disable(&recipe.name);
+        if autostart::NATIVE_TOOL_ITEMS {
+            let root = paths::data_root()?;
+            autostart::disable_tool(&recipe.name, root)?;
+        }
     }
     process::remove_pid_file(&p.data);
     remove_shims(recipe);
@@ -963,10 +1053,11 @@ pub fn dry_run(recipe: &Recipe) -> Result<DryRun, String> {
 
 // --- Background ---
 
-/// The service's startup pass — in effect "login" for the tools: adopt or
-/// clean pid files, start every daemon marked "start at login", remove
-/// per-tool login items left by an older Roadie, apply what was staged
-/// while stopped.
+/// The service's startup pass: adopt or clean pid files, bring each daemon's
+/// own login item in step (removing the `--start-tool` items of an older
+/// Roadie), start the daemons marked "start at login" that no login item of
+/// their own starts (Windows, or the first login after an upgrade), apply
+/// what was staged while stopped.
 pub fn reconcile(recipes: &[Recipe], emit: &dyn Fn(&str, Value)) {
     reconcile_with(recipes, emit, true)
 }
@@ -987,11 +1078,27 @@ pub fn reconcile_with(recipes: &[Recipe], emit: &dyn Fn(&str, Value), at_login: 
         let lv = liveness(recipe, &st, &p, &ctx);
         if autostart::is_enabled(&recipe.name) {
             match autostart::disable(&recipe.name) {
-                Ok(()) => log::info!("removed the old per-tool login item for {}; the service starts it now", recipe.name),
+                Ok(()) => log::info!("removed the old per-tool login item for {}", recipe.name),
                 Err(e) => log::warn!("could not remove the old {} login item: {e}", recipe.name),
             }
         }
-        if !lv.running && lv.conflict.is_none() {
+        // At login, a daemon with its own login item is launchd's to start
+        // (it may not have got to it yet): a second copy would only fail on
+        // the port. The first login after an upgrade has no item yet, so
+        // Roadie starts it that once, as before.
+        let own_item = autostart::NATIVE_TOOL_ITEMS && paths::data_root().is_ok_and(|r| autostart::tool_enabled(&recipe.name, r));
+        let login_item_starts_it = at_login && own_item && st.autostart;
+        {
+            let _g = lock(&recipe.name);
+            let mut s = state::load(&p.data);
+            // Started at login despite last session's Stop, as a login does.
+            if lv.running && s.user_stopped && at_login {
+                s.user_stopped = false;
+                let _ = state::save(&p.data, &s);
+            }
+            sync_login_item_logged(recipe, &s, &p);
+        }
+        if !lv.running && lv.conflict.is_none() && !login_item_starts_it {
             if st.autostart && (at_login || !st.user_stopped) {
                 // Service start is the tools' login: a Stop from the previous
                 // session does not carry over, exactly as a login item would

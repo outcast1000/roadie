@@ -3,7 +3,7 @@
 
 import type { ToolRow } from "./types";
 
-const OS_NAMES: Record<string, string> = { darwin: "macOS", windows: "Windows", linux: "Linux" };
+const OS_NAMES: Record<string, string> = { darwin: "macOS", windows: "Windows" };
 const ARCH_NAMES: Record<string, string> = { arm64: "ARM", x64: "Intel/AMD" };
 
 /** `darwin-arm64` → `macOS (ARM)`; unknown keys are shown as written. */
@@ -16,7 +16,7 @@ export function platformLabel(key: string): string {
 }
 
 /** One chip per OS: `macOS`, `Windows (ARM)`, … Both architectures collapse
- *  into the bare OS name so a card reads "macOS · Windows · Linux". */
+ *  into the bare OS name so a card reads "macOS · Windows". */
 export function platformChips(keys: string[]): string[] {
   const byOs = new Map<string, Set<string>>();
   for (const k of keys) {
@@ -24,7 +24,7 @@ export function platformChips(keys: string[]): string[] {
     if (!byOs.has(os)) byOs.set(os, new Set());
     byOs.get(os)!.add(arch);
   }
-  const order = ["darwin", "windows", "linux"];
+  const order = ["darwin", "windows"];
   return [...byOs.entries()]
     .sort((a, b) => (order.indexOf(a[0]) === -1 ? 99 : order.indexOf(a[0])) - (order.indexOf(b[0]) === -1 ? 99 : order.indexOf(b[0])))
     .map(([os, arches]) => {

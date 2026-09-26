@@ -17,8 +17,7 @@
 //! with a screen, a program could run the CLI in a pseudo-terminal it
 //! controls and answer for the user, so the dialog or window is the only way.
 //!
-//! Unix: a Unix domain socket in the data dir (`SO_PEERCRED` on Linux,
-//! `LOCAL_PEERPID` on macOS). Windows: a named pipe and
+//! macOS: a Unix domain socket in the data dir and `LOCAL_PEERPID`. Windows: a named pipe and
 //! `GetNamedPipeClientProcessId`. No crate; the FFI is hand-declared like
 //! the rest of `process.rs`.
 
@@ -291,24 +290,11 @@ mod unix {
     use std::os::unix::net::UnixStream;
 
     pub fn peer_pid(stream: &UnixStream) -> Option<u32> {
-        #[cfg(target_os = "linux")]
-        unsafe {
-            let mut cred: libc::ucred = std::mem::zeroed();
-            let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-            let rc = libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, &mut cred as *mut _ as *mut libc::c_void, &mut len);
-            (rc == 0).then_some(cred.pid as u32)
-        }
-        #[cfg(target_os = "macos")]
         unsafe {
             let mut pid: libc::pid_t = 0;
             let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
             let rc = libc::getsockopt(stream.as_raw_fd(), libc::SOL_LOCAL, libc::LOCAL_PEERPID, &mut pid as *mut _ as *mut libc::c_void, &mut len);
             (rc == 0 && pid > 0).then_some(pid as u32)
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            let _ = stream;
-            None
         }
     }
 }

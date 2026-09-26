@@ -230,8 +230,8 @@ fn dryrun(t: &Target) -> Result<(i32, Value), String> {
 /// `roadie maintain`: start the daemons marked "start at login" (at login,
 /// also the ones the user stopped last session, as a login would), apply
 /// staged updates to idle tools, and run the update pass when a day has
-/// passed. An app bundling Roadie runs it on launch; the login item runs it
-/// with `--at-login`.
+/// passed. An app bundling Roadie runs it on launch; on Windows the login
+/// item runs it with `--at-login` (elsewhere each daemon has its own item).
 fn maintain(root: &Path, at_login: bool) -> Result<(i32, Value), String> {
     let recipes: Vec<_> = store::list().into_iter().filter(|s| s.trusted()).map(|s| s.recipe).collect();
     tools::reconcile_with(&recipes, &events::emit, at_login);
@@ -246,9 +246,23 @@ fn maintain(root: &Path, at_login: bool) -> Result<(i32, Value), String> {
     Ok((0, json!({ "atLogin": at_login, "updatePass": ran, "tools": recipes.len() })))
 }
 
-/// One login item while any tool starts at login, none otherwise.
+/// macOS: each daemon that starts at login has a login item of its
+/// own, and the `maintain` item an older Roadie registered goes (after the
+/// daemons' items exist, so an upgrade never leaves a login that starts
+/// nothing). Windows: one `maintain` item while any tool starts at login,
+/// none otherwise.
 fn sync_login_item(root: &Path) {
     if cfg!(test) {
+        return;
+    }
+    if tools::autostart::NATIVE_TOOL_ITEMS {
+        let recipes: Vec<_> = store::list().into_iter().filter(|s| s.trusted()).map(|s| s.recipe).collect();
+        tools::sync_login_items(&recipes);
+        if tools::autostart::maintain_enabled(root) {
+            if let Err(e) = tools::autostart::disable_maintain(root) {
+                eprintln!("roadie: could not remove the old login item: {e}");
+            }
+        }
         return;
     }
     let any = store::list().into_iter().filter(|s| s.trusted()).any(|s| paths::tool_paths(&s.recipe.name).is_ok_and(|p| tools::state::load(&p.data).autostart));
@@ -399,7 +413,7 @@ pub(super) mod tests {
     /// trusts the recipe, then fails at install without the network.
     fn elsewhere_recipe(name: &str) -> std::path::PathBuf {
         let mut r: Value = serde_json::from_str(crate::recipe::BUILTIN.iter().find(|(n, _)| *n == "yt-dlp").unwrap().1).unwrap();
-        let other = if crate::recipe::Platform::current().key().starts_with("darwin") { "linux-x64" } else { "darwin-arm64" };
+        let other = if crate::recipe::Platform::current().key().starts_with("darwin") { "windows-x64" } else { "darwin-arm64" };
         let asset = r["source"]["assets"][other].clone();
         r["name"] = json!(name);
         r["platforms"] = json!([other]);

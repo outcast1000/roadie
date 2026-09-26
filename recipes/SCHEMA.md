@@ -36,7 +36,7 @@ built-in example. Copy the closest built-in and edit it.
 | `busy` | `{ requests, busyIf: { path, regex } }` | when any reply has a value at `path` matching `regex`, the daemon is busy and must not be restarted |
 | `stop` | `{ graceSec, api: [ HttpRequest ] }` | graceful stop through the tool's API; then SIGTERM/Ctrl-Break; then kill |
 | `startAfterInstall` | `{ default, askOnInstall }` | daemon only; Roadie starts the daemon right after the first install. Decision key `startNow` |
-| `autostart` | `{ default, askOnInstall }` | daemon only; register a login item (Roadie's launcher mode, never the daemon's own path). Decision key `autostart` |
+| `autostart` | `{ default, askOnInstall }` | daemon only; start at login: on macOS the daemon's own login item (its binary and run args), on Windows Roadie's item starts it. Decision key `autostart` |
 | `startFailures` | `[ { regex, code, message } ]` | matched against the log when the process dies during startup |
 | `logExtract` | `{ key: regex }` | `details.<key>` read off the log (first capture) |
 
@@ -69,7 +69,8 @@ When one tool is packaged differently per OS, `overrides` replaces `source` / `a
   "layout": { "stripTopDir": true, "binaries": ["bin/ffmpeg", "bin/ffprobe"] } } }
 ```
 
-Platforms: `darwin-arm64`, `darwin-x64`, `windows-x64`, `windows-arm64`, `linux-x64`, `linux-arm64`.
+Platforms: `darwin-arm64`, `darwin-x64`, `windows-x64`, `windows-arm64`. Roadie runs on macOS and
+Windows only; there are no Linux platforms.
 `platforms` lists the ones the recipe targets; a platform not listed (or without a download) means
 "not available on this computer". The validator points at `/platforms/<i>` for a listed platform
 with no download and at `/platforms` for a download whose platform is not listed. Latest-release lookup uses

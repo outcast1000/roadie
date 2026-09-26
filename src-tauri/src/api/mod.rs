@@ -1002,7 +1002,7 @@ mod tests {
         // A copy of yt-dlp that targets only another platform, so approving
         // it fails at install without touching the network.
         let mut theirs: Value = serde_json::from_str(recipe::BUILTIN.iter().find(|(n, _)| *n == "yt-dlp").unwrap().1).unwrap();
-        let other = if recipe::Platform::current().key().starts_with("darwin") { "linux-x64" } else { "darwin-arm64" };
+        let other = if recipe::Platform::current().key().starts_with("darwin") { "windows-x64" } else { "darwin-arm64" };
         let asset = theirs["source"]["assets"][other].clone();
         theirs["name"] = json!("brought-demo");
         theirs["displayName"] = json!("Brought Demo");

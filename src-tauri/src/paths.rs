@@ -27,10 +27,6 @@ pub fn default_data_root() -> PathBuf {
     {
         std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| home_dir().join("AppData").join("Roaming")).join(id)
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home_dir().join(".local").join("share")).join(id)
-    }
 }
 
 pub fn data_root() -> Result<&'static Path, String> {

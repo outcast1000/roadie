@@ -78,7 +78,7 @@ cd src-tauri && cargo test --lib tools::probe -- --ignored --nocapture   # real 
 ```
 
 Data lives in `~/Library/Application Support/com.outcast1000.roadie` (macOS),
-`%APPDATA%\com.outcast1000.roadie` (Windows), `~/.local/share/com.outcast1000.roadie` (Linux).
+`%APPDATA%\com.outcast1000.roadie` (Windows). Roadie runs on macOS and Windows only.
 
 ## License
 

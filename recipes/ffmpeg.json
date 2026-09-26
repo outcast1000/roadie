@@ -3,11 +3,11 @@
   "name": "ffmpeg",
   "displayName": "FFmpeg",
   "author": "Roadie",
-  "revision": 1,
+  "revision": 2,
   "summary": "Converts, merges and inspects audio and video. yt-dlp needs it to merge separate streams; players use it to transcode.",
   "homepage": "https://ffmpeg.org",
   "license": "GPL-3.0 (static builds)",
-  "notes": "Apple Silicon builds are Martin Riedl's signed static releases (ffmpeg only — ffprobe is a separate download there). Windows builds are BtbN's GPL master builds and include ffprobe. Intel Macs and Linux are not covered by this recipe yet; use Homebrew or your package manager there.",
+  "notes": "Apple Silicon builds are Martin Riedl's signed static releases (ffmpeg only — ffprobe is a separate download there). Windows builds are BtbN's GPL master builds and include ffprobe. Intel Macs are not covered by this recipe yet; use Homebrew there.",
   "kind": "cli",
   "platforms": ["darwin-arm64", "windows-x64", "windows-arm64"],
   "source": {

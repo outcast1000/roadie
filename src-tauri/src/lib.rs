@@ -11,6 +11,11 @@
 //! Built with no features, the binary is the standalone CLI release: no
 //! window, no service, no API. Every command runs in-process and the user
 //! answers requests in a native dialog (`cli/local.rs`, `prompt.rs`).
+//!
+//! macOS and Windows only. Code under `cfg(unix)` means macOS.
+
+#[cfg(not(any(target_os = "macos", windows)))]
+compile_error!("Roadie supports macOS and Windows only");
 
 pub mod actions;
 #[cfg(feature = "service")]
@@ -60,7 +65,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // A second launch (deep link on Windows/Linux, or the user
+            // A second launch (deep link on Windows, or the user
             // opening the app again) lands here: forward and focus.
             for a in argv.iter().filter(|a| a.starts_with("roadie://")) {
                 scheme::handle(app, a);
@@ -119,7 +124,7 @@ pub fn run() {
                     }
                 });
             }
-            // The one that launched us (Windows/Linux pass it in argv).
+            // The one that launched us (Windows passes it in argv).
             for a in args.iter().skip(1).filter(|a| a.starts_with("roadie://")) {
                 scheme::handle(&handle, a);
             }

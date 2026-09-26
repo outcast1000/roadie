@@ -154,18 +154,9 @@ pub fn pid_exe(pid: u32) -> Option<PathBuf> {
         buf.truncate(n as usize);
         Some(PathBuf::from(String::from_utf8_lossy(&buf).into_owned()))
     }
-    #[cfg(target_os = "linux")]
-    {
-        std::fs::read_link(format!("/proc/{pid}/exe")).ok()
-    }
     #[cfg(windows)]
     unsafe {
         win::pid_exe(pid)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-    {
-        let _ = pid;
-        None
     }
 }
 

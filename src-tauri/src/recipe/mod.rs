@@ -20,15 +20,9 @@ use std::collections::BTreeMap;
 
 pub const RECIPE_VERSION: u32 = 1;
 
-/// Platforms a recipe may name assets for. `os-arch`.
-pub const PLATFORMS: &[&str] = &[
-    "darwin-arm64",
-    "darwin-x64",
-    "windows-x64",
-    "windows-arm64",
-    "linux-x64",
-    "linux-arm64",
-];
+/// Platforms a recipe may name assets for. `os-arch`. Roadie runs on macOS
+/// and Windows only.
+pub const PLATFORMS: &[&str] = &["darwin-arm64", "darwin-x64", "windows-x64", "windows-arm64"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Platform {
@@ -40,8 +34,7 @@ impl Platform {
     pub fn current() -> Self {
         let os = match std::env::consts::OS {
             "macos" => "darwin",
-            "windows" => "windows",
-            _ => "linux",
+            _ => "windows",
         };
         let arch = match std::env::consts::ARCH {
             "aarch64" => "arm64",
@@ -1208,7 +1201,7 @@ mod tests {
         assert_eq!(r.kind, Kind::Daemon);
         assert_eq!(r.main_binary(), "slskd");
         assert!(r.supported_on(&Platform { os: "darwin", arch: "arm64" }));
-        assert!(!r.supported_on(&Platform { os: "linux", arch: "arm64" }));
+        assert!(!r.supported_on(&Platform { os: "freebsd", arch: "arm64" }));
         assert_eq!(r.ports["web"].default, 5030);
         assert!(r.connection.as_ref().unwrap().policy == ConnectionPolicy::PerConsumerKey);
         let login = r.connection.as_ref().unwrap().web_login.as_ref().expect("slskd's web UI sits behind a generated login");
@@ -1262,14 +1255,20 @@ mod tests {
         assert_eq!(pointers(&errs), vec!["/revision"], "a missing revision reads as 0");
 
         // Listing a platform with no download.
-        let errs = with(|v| v["platforms"].as_array_mut().unwrap().push(Value::String("linux-arm64".into())));
-        assert_eq!(pointers(&errs), vec!["/platforms/5"]);
-        assert!(errs[0].message.contains("linux-arm64") && errs[0].message.contains("no download"), "{errs:?}");
+        let errs = with(|v| {
+            v["source"]["assets"].as_object_mut().unwrap().remove("darwin-x64");
+        });
+        assert_eq!(pointers(&errs), vec!["/platforms/1"]);
+        assert!(errs[0].message.contains("darwin-x64") && errs[0].message.contains("no download"), "{errs:?}");
 
         // A download for a platform that is not listed.
-        let errs = with(|v| v["platforms"].as_array_mut().unwrap().retain(|p| p != "linux-x64"));
+        let errs = with(|v| v["platforms"].as_array_mut().unwrap().retain(|p| p != "windows-arm64"));
         assert_eq!(pointers(&errs), vec!["/platforms"]);
-        assert!(errs[0].message.contains("linux-x64"), "{errs:?}");
+        assert!(errs[0].message.contains("windows-arm64"), "{errs:?}");
+
+        // Linux is not a platform Roadie runs on.
+        let errs = with(|v| v["platforms"][0] = Value::String("linux-x64".into()));
+        assert!(pointers(&errs).contains(&"/platforms/0"), "{errs:?}");
 
         let errs = with(|v| v["platforms"][0] = Value::String("freebsd-x64".into()));
         let p = pointers(&errs);
@@ -1284,10 +1283,10 @@ mod tests {
         // Overrides count as downloads: ffmpeg lists Windows only through them.
         let ffmpeg = load_builtin().into_iter().find(|r| r.name == "ffmpeg").unwrap();
         assert!(ffmpeg.has_download_for("windows-x64"));
-        assert!(!ffmpeg.has_download_for("linux-x64"));
+        assert!(!ffmpeg.has_download_for("darwin-x64"));
         assert_eq!(ffmpeg.platforms, vec!["darwin-arm64", "windows-x64", "windows-arm64"]);
         assert_eq!(ffmpeg.author, "Roadie");
-        assert_eq!(ffmpeg.revision, 1);
+        assert_eq!(ffmpeg.revision, 2);
     }
 
     #[test]
