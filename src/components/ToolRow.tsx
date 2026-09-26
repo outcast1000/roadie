@@ -4,7 +4,7 @@ import type { ConfigField, DeferReason, InstallProgress, StoredRecipe, ToolRow a
 import type { ToolsHook } from "../hooks/useTools";
 import { ConfigForm } from "./ConfigForm";
 import { platformChips, platformLabel } from "../search";
-import { installFields } from "../install";
+import { installFields, recipeFields } from "../install";
 import { InstallPlan } from "./InstallPlan";
 import type { DryRun } from "../types";
 
@@ -89,7 +89,7 @@ export function ToolRow({ tool: t, recipe, tools, highlighted, onReview, onRevok
   const busy = tools.busy[t.name];
   const progress = progressText(tools.installing[t.name]);
   const label = stateLabel(t);
-  const fields: ConfigField[] = recipe?.recipe.config ?? [];
+  const fields: ConfigField[] = recipeFields(recipe?.recipe);
   const decisions = installFields(fields, recipe?.recipe);
   const installProgress = tools.installing[t.name];
   const error = tools.errors[t.name];

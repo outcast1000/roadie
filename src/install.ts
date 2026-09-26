@@ -38,6 +38,23 @@ export function engineChoices(recipe: Pick<Recipe, "kind" | "startAfterInstall" 
   return out;
 }
 
+/** Every field a recipe offers: its `config` fields, then its
+ *  `configuration` entries as fields keyed by their entry path — the same
+ *  list the engine builds (`Recipe::fields`). */
+export function recipeFields(recipe?: Pick<Recipe, "config" | "configuration">): ConfigField[] {
+  if (!recipe) return [];
+  const entries = (recipe.configuration ?? []).map((e) => ({
+    key: e.entry,
+    label: e.label,
+    help: e.help,
+    kind: e.kind,
+    required: e.required,
+    default: e.default,
+    askOnInstall: e.askOnInstall,
+  }));
+  return [...recipe.config, ...entries];
+}
+
 /** The recipe's `askOnInstall` fields plus every `required` one, followed
  *  by the engine choices the recipe offers. */
 export function installFields(fields: ConfigField[], recipe?: Pick<Recipe, "kind" | "startAfterInstall" | "autostart">): ConfigField[] {

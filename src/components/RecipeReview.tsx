@@ -160,6 +160,20 @@ export function RecipeReview({ stored, dryRun, onTrust, onDelete, onClose, broug
         ))}
       </ul>
 
+      {r.configuration && r.configuration.length > 0 ? (
+        <>
+          <h3>Settings of its own config file an app may set</h3>
+          <ul>
+            {r.configuration.map((e) => (
+              <li key={e.entry}>
+                {e.label} <span className="mono">{e.entry}</span>{" "}
+                <span className="muted">({e.kind}{e.merge === "append" ? ", added to the recipe's own" : ""})</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+
       <button className="ghost small" onClick={() => setShowJson((s) => !s)}>
         {showJson ? "Hide" : "Show"} recipe JSON
       </button>

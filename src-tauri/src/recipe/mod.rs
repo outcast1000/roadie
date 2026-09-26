@@ -15,7 +15,7 @@ pub mod store;
 pub mod template;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 pub const RECIPE_VERSION: u32 = 1;
@@ -122,6 +122,11 @@ pub struct Recipe {
     pub ports: BTreeMap<String, PortDef>,
     #[serde(default)]
     pub config: Vec<ConfigField>,
+    /// Settings of the tool's own config file that an installing app or the
+    /// user may set, each named by its real key there (`shares.directories`)
+    /// and written straight into it. See `ConfigEntry`.
+    #[serde(default)]
+    pub configuration: Vec<ConfigEntry>,
     #[serde(default)]
     pub connection: Option<Connection>,
     /// Directories that must exist before start (tools that refuse to start
@@ -291,6 +296,9 @@ pub enum FieldKind {
     Text,
     Password,
     Path,
+    /// A list of absolute folders (JSON array of strings). In a template, a
+    /// placeholder naming one inside an array is spliced into it.
+    Paths,
     Bool,
     Port,
 }
@@ -324,6 +332,109 @@ pub struct ConfigField {
     /// fields are always asked.
     #[serde(default)]
     pub ask_on_install: bool,
+}
+
+/// One setting of the tool's own config file, named by its real key there.
+/// Roadie writes the value at `entry` (a dotted path) in the file the recipe
+/// generates, after rendering it. The recipe decides which settings are open:
+/// anything not listed stays as the recipe wrote it, so an app cannot reach
+/// the web binding or the API keys.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigEntry {
+    /// Dotted path inside the file, e.g. `shares.directories`. Also the key
+    /// its value is stored and set under (`--set shares.directories=…`).
+    pub entry: String,
+    pub label: String,
+    #[serde(default)]
+    pub help: Option<String>,
+    pub kind: FieldKind,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub default: Option<Value>,
+    #[serde(default)]
+    pub ask_on_install: bool,
+    /// `replace` (default) sets the entry; `append` adds a `paths` value's
+    /// folders to the list the recipe already writes there.
+    #[serde(default)]
+    pub merge: Merge,
+    /// Which `files[].path` it lives in; may be left out when the recipe
+    /// writes exactly one file.
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Merge {
+    #[default]
+    Replace,
+    Append,
+}
+
+impl ConfigEntry {
+    fn as_field(&self) -> ConfigField {
+        ConfigField {
+            key: self.entry.clone(),
+            label: self.label.clone(),
+            help: self.help.clone(),
+            kind: self.kind,
+            required: self.required,
+            secret: false,
+            default: self.default.clone(),
+            tcc_sensitive: false,
+            create_dir: false,
+            ask_on_install: self.ask_on_install,
+        }
+    }
+}
+
+/// Write the `configuration` entries' values into one rendered file's
+/// content. `file_index` is the file's position in `files`; values are read
+/// from the stored config by entry path, and an entry with no value leaves
+/// the file as the recipe wrote it.
+pub fn apply_entries(r: &Recipe, file_index: usize, content: &mut Value, config: &Map<String, Value>) {
+    for e in &r.configuration {
+        let target = match &e.file {
+            Some(p) => r.files.iter().position(|f| &f.path == p),
+            None => Some(0),
+        };
+        if target != Some(file_index) {
+            continue;
+        }
+        let Some(v) = config.get(&e.entry) else { continue };
+        let mut node = &mut *content;
+        let parts: Vec<&str> = e.entry.split('.').collect();
+        for part in &parts[..parts.len() - 1] {
+            if !node.is_object() {
+                *node = Value::Object(Map::new());
+            }
+            node = node.as_object_mut().unwrap().entry(part.to_string()).or_insert_with(|| Value::Object(Map::new()));
+        }
+        if !node.is_object() {
+            *node = Value::Object(Map::new());
+        }
+        let last = parts[parts.len() - 1].to_string();
+        let obj = node.as_object_mut().unwrap();
+        match (e.merge, v) {
+            (Merge::Append, Value::Array(add)) => {
+                let slot = obj.entry(last).or_insert_with(|| Value::Array(Vec::new()));
+                if !slot.is_array() {
+                    *slot = Value::Array(Vec::new());
+                }
+                let list = slot.as_array_mut().unwrap();
+                for item in add {
+                    if !list.contains(item) {
+                        list.push(item.clone());
+                    }
+                }
+            }
+            _ => {
+                obj.insert(last, v.clone());
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -657,6 +768,7 @@ pub fn validate(r: &Recipe) -> Vec<ValidationError> {
         if let Some(d) = &f.default {
             let ok = match f.kind {
                 FieldKind::Bool => d.is_boolean(),
+                FieldKind::Paths => d.as_array().is_some_and(|a| a.iter().all(|v| v.is_string())),
                 FieldKind::Port => d.as_u64().is_some_and(|n| (1..=65535).contains(&n)),
                 FieldKind::Password => false,
                 _ => d.is_string(),
@@ -670,6 +782,49 @@ pub fn validate(r: &Recipe) -> Vec<ValidationError> {
         }
         if f.create_dir && f.kind != FieldKind::Path {
             err!(&format!("/config/{i}/createDir"), "only path fields can create directories");
+        }
+    }
+    for (i, e) in r.configuration.iter().enumerate() {
+        let p = |field: &str| format!("/configuration/{i}/{field}");
+        if e.entry.is_empty() || e.entry.split('.').any(|s| !is_valid_key(s)) {
+            err!(&p("entry"), "must be a dotted path of identifiers, e.g. `shares.directories`");
+        }
+        if !seen.insert(format!("config:{}", e.entry)) {
+            err!(&p("entry"), "duplicate entry, or it repeats a config key");
+        }
+        if e.label.trim().is_empty() {
+            err!(&p("label"), "must not be empty");
+        }
+        if e.kind == FieldKind::Password {
+            err!(&p("kind"), "a configuration entry cannot be a password: declare a secret `config` field and place it with `{secrets.<key>}` instead");
+        }
+        if e.merge == Merge::Append && e.kind != FieldKind::Paths {
+            err!(&p("merge"), "`append` is for `paths` entries; use `replace`");
+        }
+        if let Some(d) = &e.default {
+            let ok = match e.kind {
+                FieldKind::Bool => d.is_boolean(),
+                FieldKind::Paths => d.as_array().is_some_and(|a| a.iter().all(|v| v.is_string())),
+                FieldKind::Port => d.as_u64().is_some_and(|n| (1..=65535).contains(&n)),
+                FieldKind::Password => false,
+                _ => d.is_string(),
+            };
+            if !ok {
+                err!(&p("default"), "does not match the entry kind");
+            }
+        }
+        let file = match &e.file {
+            Some(path) => r.files.iter().find(|f| &f.path == path),
+            None if r.files.len() == 1 => r.files.first(),
+            None => None,
+        };
+        match file {
+            None if e.file.is_some() => err!(&p("file"), "names no `files[].path` of this recipe"),
+            None => err!(&p("file"), if r.files.is_empty() { "this recipe writes no file for the entry to live in" } else { "this recipe writes several files: name the one this entry lives in" }),
+            Some(f) if !matches!(f.format, FileFormat::Yaml | FileFormat::Json) => {
+                err!(&p("file"), "configuration entries need a yaml or json file (nested keys)")
+            }
+            Some(_) => {}
         }
     }
 
@@ -978,13 +1133,20 @@ impl Recipe {
         let key = platform.key();
         self.platforms.iter().any(|p| *p == key) && self.has_download_for(&key)
     }
-    pub fn config_field(&self, key: &str) -> Option<&ConfigField> {
-        self.config.iter().find(|f| f.key == key)
+    /// `config` plus one field per `configuration` entry, keyed by its entry
+    /// path: what the state, the prompts and the forms work from. Built on
+    /// each call rather than kept, so it can never disagree with the recipe.
+    pub fn fields(&self) -> Vec<ConfigField> {
+        self.config.iter().cloned().chain(self.configuration.iter().map(ConfigEntry::as_field)).collect()
+    }
+    /// A `config` field or a `configuration` entry, by key / entry path.
+    pub fn config_field(&self, key: &str) -> Option<ConfigField> {
+        self.fields().into_iter().find(|f| f.key == key)
     }
     /// The decisions an install needs: `askOnInstall` fields plus every
-    /// `required` one.
-    pub fn install_fields(&self) -> Vec<&ConfigField> {
-        self.config.iter().filter(|f| f.ask_on_install || f.required).collect()
+    /// `required` one, `configuration` entries included.
+    pub fn install_fields(&self) -> Vec<ConfigField> {
+        self.fields().into_iter().filter(|f| f.ask_on_install || f.required).collect()
     }
 }
 
@@ -1162,6 +1324,65 @@ mod tests {
 
         let errs = with(|v| v["files"][0]["path"] = Value::String("{home}/evil.yml".into()));
         assert_eq!(pointers(&errs), vec!["/files/0/path"]);
+    }
+
+    #[test]
+    fn configuration_entries_are_fields_keyed_by_their_path() {
+        let r = slskd();
+        let f = r.config_field("shares.directories").expect("the entry is a field");
+        assert_eq!(f.kind, FieldKind::Paths);
+        assert!(r.install_fields().iter().any(|f| f.key == "shares.directories"), "asked on install");
+        assert!(r.config.iter().all(|f| f.key != "shares.directories"), "authored in its own section");
+    }
+
+    #[test]
+    fn entries_write_into_the_rendered_file() {
+        let r = slskd();
+        let mut content = serde_json::json!({ "shares": { "directories": ["/dl"] }, "web": { "port": 5030 } });
+        let mut config = Map::new();
+        config.insert("shares.directories".into(), serde_json::json!(["/music", "/dl", "/rock"]));
+        apply_entries(&r, 0, &mut content, &config);
+        assert_eq!(content["shares"]["directories"], serde_json::json!(["/dl", "/music", "/rock"]), "append keeps the recipe's own and skips repeats");
+        assert_eq!(content["web"]["port"], serde_json::json!(5030), "entries not listed stay as the recipe wrote them");
+
+        // Replace, and a path the recipe didn't write yet is created.
+        let mut rr = r.clone();
+        rr.configuration[0].merge = Merge::Replace;
+        rr.configuration[0].entry = "soulseek.description".into();
+        rr.configuration[0].kind = FieldKind::Text;
+        let mut content = serde_json::json!({ "soulseek": { "username": "bj" } });
+        let mut config = Map::new();
+        config.insert("soulseek.description".into(), serde_json::json!("hi"));
+        apply_entries(&rr, 0, &mut content, &config);
+        assert_eq!(content, serde_json::json!({ "soulseek": { "username": "bj", "description": "hi" } }));
+
+        // No value stored: the file is untouched. Another file index: untouched.
+        let before = serde_json::json!({ "shares": { "directories": ["/dl"] } });
+        let mut content = before.clone();
+        apply_entries(&r, 0, &mut content, &Map::new());
+        assert_eq!(content, before);
+        let mut content = before.clone();
+        apply_entries(&r, 1, &mut content, &config);
+        assert_eq!(content, before);
+    }
+
+    #[test]
+    fn configuration_entries_are_validated_with_pointers() {
+        let errs = with(|v| v["configuration"][0]["entry"] = Value::String("shares..directories".into()));
+        assert_eq!(pointers(&errs), vec!["/configuration/0/entry"]);
+        let errs = with(|v| v["configuration"][0]["kind"] = Value::String("password".into()));
+        assert!(pointers(&errs).contains(&"/configuration/0/kind"), "{errs:?}");
+        let errs = with(|v| {
+            v["configuration"][0]["kind"] = Value::String("text".into());
+            v["configuration"][0]["default"] = Value::String("".into());
+        });
+        assert_eq!(pointers(&errs), vec!["/configuration/0/merge"], "append is for paths: {errs:?}");
+        let errs = with(|v| v["configuration"][0]["file"] = Value::String("{data}/nope.yml".into()));
+        assert_eq!(pointers(&errs), vec!["/configuration/0/file"]);
+        let errs = with(|v| v["configuration"][0]["entry"] = Value::String("soulseekUsername".into()));
+        assert!(pointers(&errs).contains(&"/configuration/0/entry"), "clashes with a config key: {errs:?}");
+        let errs = with(|v| v["files"][0]["format"] = Value::String("raw".into()));
+        assert!(pointers(&errs).contains(&"/configuration/0/file"), "raw files have no keys: {errs:?}");
     }
 
     #[test]

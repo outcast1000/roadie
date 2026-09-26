@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { engineChoices, installFields, isSettled, recipeChangeText, withRequestDecisions } from "../install";
+import { engineChoices, installFields, isSettled, recipeChangeText, recipeFields, withRequestDecisions } from "../install";
 import type { ConfigField, Recipe, ToolRow } from "../types";
 
 const fields: ConfigField[] = [
@@ -46,5 +46,22 @@ describe("recipeChangeText", () => {
     expect(recipeChangeText("replacesBuiltin")).toMatch(/built-in/);
     expect(recipeChangeText("changesTrusted")).toMatch(/you trusted/);
     expect(recipeChangeText("replacesDraft")).toMatch(/draft/);
+  });
+});
+
+describe("recipeFields", () => {
+  it("adds configuration entries as fields keyed by their entry path, after config", () => {
+    const fields = recipeFields({
+      config: [{ key: "downloadsDir", label: "Downloads folder", kind: "path" }],
+      configuration: [{ entry: "shares.directories", label: "Also share these folders", kind: "paths", default: [], askOnInstall: true, merge: "append" }],
+    });
+    expect(fields.map((f) => f.key)).toEqual(["downloadsDir", "shares.directories"]);
+    expect(fields[1]).toMatchObject({ kind: "paths", askOnInstall: true, default: [] });
+    expect(installFields(fields).map((f) => f.key)).toEqual(["shares.directories"]);
+  });
+
+  it("is empty without a recipe and plain config without entries", () => {
+    expect(recipeFields(undefined)).toEqual([]);
+    expect(recipeFields({ config: [{ key: "a", label: "A", kind: "text" }] }).map((f) => f.key)).toEqual(["a"]);
   });
 });

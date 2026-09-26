@@ -3,7 +3,7 @@
   "name": "slskd",
   "displayName": "slskd",
   "author": "Roadie",
-  "revision": 2,
+  "revision": 3,
   "summary": "Soulseek client with a web UI and HTTP API. Music apps use it to search and download from the Soulseek network.",
   "homepage": "https://github.com/slskd/slskd",
   "license": "AGPL-3.0",
@@ -47,6 +47,11 @@
       "tccSensitive": true, "createDir": true, "askOnInstall": true },
     { "key": "shareDownloads", "label": "Share my downloads folder", "kind": "bool", "default": true,
       "help": "Soulseek is give-and-take: users who share nothing get queued behind everyone else." }
+  ],
+  "configuration": [
+    { "entry": "shares.directories", "merge": "append", "kind": "paths", "default": [], "askOnInstall": true,
+      "label": "Also share these folders",
+      "help": "Folders other Soulseek users can browse and download from. Added to the downloads folder when that is shared too." }
   ],
   "connection": {
     "policy": "perConsumerKey",

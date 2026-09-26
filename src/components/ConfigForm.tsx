@@ -30,7 +30,12 @@ export function ConfigForm({ tool, fields, saving, onSave, onCancel, submitLabel
   const initial: Record<string, unknown> = {};
   for (const f of fields) {
     if (f.secret) continue;
-    initial[f.key] = tool.config[f.key] ?? (f.kind === "bool" ? (typeof f.default === "boolean" ? f.default : false) : "");
+    // A `paths` list is edited as one folder per line.
+    const current = tool.config[f.key];
+    initial[f.key] =
+      f.kind === "paths"
+        ? (Array.isArray(current) ? current : Array.isArray(f.default) ? f.default : []).join("\n")
+        : current ?? (f.kind === "bool" ? (typeof f.default === "boolean" ? f.default : false) : "");
   }
   const [values, setValues] = useState<Record<string, unknown>>(initial);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
@@ -57,6 +62,16 @@ export function ConfigForm({ tool, fields, saving, onSave, onCancel, submitLabel
           return;
         }
         if (v !== "") patch[f.key] = n;
+        continue;
+      }
+      if (f.kind === "paths") {
+        const list = String(v ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+        const before = Array.isArray(tool.config[f.key]) ? (tool.config[f.key] as unknown[]) : [];
+        if (f.required && list.length === 0) {
+          setProblem(`${f.label} is required`);
+          return;
+        }
+        if (sendAll ? list.length > 0 : JSON.stringify(list) !== JSON.stringify(before)) patch[f.key] = list;
         continue;
       }
       if (f.required && (v === "" || v === undefined)) {
@@ -95,6 +110,28 @@ export function ConfigForm({ tool, fields, saving, onSave, onCancel, submitLabel
                   Clear
                 </button>
               ) : null}
+            </span>
+          ) : f.kind === "paths" ? (
+            <span className="field-col">
+              <textarea rows={3} spellCheck={false} placeholder="One folder per line" value={String(values[f.key] ?? "")} onChange={(e) => set(f.key, e.target.value)} />
+              <button
+                type="button"
+                className="ghost"
+                onClick={async () => {
+                  try {
+                    const picked = await openDialog({ directory: true, multiple: true });
+                    const add = Array.isArray(picked) ? picked : typeof picked === "string" ? [picked] : [];
+                    if (add.length) {
+                      const cur = String(values[f.key] ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+                      set(f.key, [...cur, ...add.filter((p) => !cur.includes(p))].join("\n"));
+                    }
+                  } catch (e) {
+                    console.error("Folder picker failed:", e);
+                  }
+                }}
+              >
+                Add folders…
+              </button>
             </span>
           ) : f.kind === "path" ? (
             <span className="field-row">

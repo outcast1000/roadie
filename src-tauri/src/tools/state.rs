@@ -83,7 +83,7 @@ fn fill(recipe: &Recipe, s: &mut ToolState, data_dir: &Path, platform: &recipe::
     let mut ctx = recipe::template::Ctx::empty(*platform);
     ctx.home = paths::home_dir().to_string_lossy().into_owned();
     ctx.data = data_dir.to_string_lossy().into_owned();
-    for f in &recipe.config {
+    for f in &recipe.fields() {
         if f.secret || s.config.contains_key(&f.key) {
             continue;
         }
@@ -149,6 +149,13 @@ pub fn apply_patch(recipe: &Recipe, s: &mut ToolState, patch: &Map<String, Value
                     s.config.insert(k.clone(), Value::String(t.to_string()));
                 }
             }
+            FieldKind::Paths => {
+                let list = parse_paths(v).map_err(|e| format!("`{}`: {e}", f.label))?;
+                if list.is_empty() && f.required {
+                    return Err(format!("`{}` cannot be empty", f.label));
+                }
+                s.config.insert(k.clone(), Value::Array(list.into_iter().map(Value::String).collect()));
+            }
             FieldKind::Text => {
                 let t = v.as_str().map(str::trim).ok_or_else(|| format!("`{k}` must be a string"))?;
                 if t.is_empty() {
@@ -163,6 +170,38 @@ pub fn apply_patch(recipe: &Recipe, s: &mut ToolState, patch: &Map<String, Value
         }
     }
     Ok(())
+}
+
+/// A `paths` value: a JSON array of strings, or one string holding either a
+/// JSON array or one path per line (what `--set key=…` hands over). Every
+/// entry must be absolute; blanks and repeats are dropped, order kept.
+pub fn parse_paths(v: &Value) -> Result<Vec<String>, String> {
+    let items: Vec<String> = match v {
+        Value::Array(a) => a
+            .iter()
+            .map(|i| i.as_str().map(str::to_string).ok_or_else(|| "every entry must be a string".to_string()))
+            .collect::<Result<_, _>>()?,
+        Value::String(s) if s.trim_start().starts_with('[') => {
+            let parsed: Value = serde_json::from_str(s).map_err(|e| format!("not a JSON array: {e}"))?;
+            return parse_paths(&parsed);
+        }
+        Value::String(s) => s.lines().map(str::to_string).collect(),
+        _ => return Err("must be a list of folders".into()),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for raw in items {
+        let t = raw.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if !Path::new(t).is_absolute() {
+            return Err(format!("`{t}` is not an absolute path"));
+        }
+        if !out.iter().any(|o| o == t) {
+            out.push(t.to_string());
+        }
+    }
+    Ok(out)
 }
 
 /// Check a patch against the recipe without touching any state — the API
@@ -189,6 +228,24 @@ mod tests {
 
     fn slskd() -> Recipe {
         recipe::load_builtin().remove(0)
+    }
+
+    #[test]
+    fn paths_take_a_json_array_or_one_folder_per_line() {
+        let abs = if cfg!(windows) { ("C:\\m", "C:\\n") } else { ("/m", "/n") };
+        let want = vec![abs.0.to_string(), abs.1.to_string()];
+        assert_eq!(parse_paths(&serde_json::json!([abs.0, abs.1, abs.0])).unwrap(), want, "repeats dropped, order kept");
+        assert_eq!(parse_paths(&Value::String(format!("{}\n\n  {}  \n", abs.0, abs.1))).unwrap(), want, "blank lines and padding dropped");
+        assert_eq!(parse_paths(&Value::String(serde_json::to_string(&want).unwrap())).unwrap(), want, "a JSON array in a --set string");
+        assert!(parse_paths(&serde_json::json!(["relative/dir"])).unwrap_err().contains("not an absolute path"));
+        assert!(parse_paths(&serde_json::json!(true)).is_err());
+
+        let r = slskd();
+        let mut st = ToolState::default();
+        let mut patch = Map::new();
+        patch.insert("shares.directories".into(), Value::String(format!("{}\n{}", abs.0, abs.1)));
+        apply_patch(&r, &mut st, &patch).unwrap();
+        assert_eq!(st.config["shares.directories"], serde_json::json!(want));
     }
 
     fn tmp(name: &str) -> std::path::PathBuf {

@@ -34,6 +34,10 @@ writing recipes from it. When a field changes, update SCHEMA.md in the same chan
   verified by running it.
 - Daemons bind `127.0.0.1`. A `files[].content` that binds elsewhere is a recipe the review
   screen should make the user distrust; don't add engine code to "fix" it.
+- A setting an installing app should be able to decide goes in `configuration`, named by the
+  tool's own key (`shares.directories`) — not as a `config` field plus a placeholder. The recipe's
+  `files` keep everything Roadie must control (ports, bindings, keys); an entry can only touch what
+  it names. Placement is `recipe::apply_entries`, run by `render_files` after expanding the file.
 - Config fields that are secrets are `kind: password, secret: true` and flow to `{secrets.X}`;
   everything else is `{config.X}`. Directories a daemon refuses to start without go in
   `createDirs` or a path field's `createDir`.

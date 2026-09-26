@@ -47,7 +47,7 @@ export interface ToolRow {
   submittedBy: string | null;
 }
 
-export type FieldKind = "text" | "password" | "path" | "bool" | "port";
+export type FieldKind = "text" | "password" | "path" | "paths" | "bool" | "port";
 
 export interface ConfigField {
   key: string;
@@ -61,6 +61,21 @@ export interface ConfigField {
   createDir?: boolean;
   /** Ask for this before the first install (required fields are always asked). */
   askOnInstall?: boolean;
+}
+
+/** A setting of the tool's own config file, named by its real key there
+ *  (`shares.directories`); Roadie writes the value into the file. Stored and
+ *  set under `entry`, so as a form field its key is the entry path. */
+export interface ConfigEntry {
+  entry: string;
+  label: string;
+  help?: string | null;
+  kind: FieldKind;
+  required?: boolean;
+  default?: unknown;
+  askOnInstall?: boolean;
+  merge?: "replace" | "append";
+  file?: string | null;
 }
 
 export interface InstallChoice {
@@ -84,6 +99,7 @@ export interface Recipe {
   archive: string;
   layout?: { stripTopDir?: boolean; binaries?: string[] };
   config: ConfigField[];
+  configuration?: ConfigEntry[];
   ports?: Record<string, { default: number; pick?: boolean }>;
   connection?: { policy: ConnectionPolicy; url: string } | null;
   createDirs?: string[];

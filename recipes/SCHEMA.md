@@ -27,6 +27,7 @@ built-in example. Copy the closest built-in and edit it.
 | `secrets` | `[ { key, generate: "hex<N>" } ]` | generated once, stored in state, available as `{secrets.key}` |
 | `ports` | `{ name: { default, pick } }` | daemon only; `pick: true` scans `default+1..+10` when the default is taken by something else |
 | `config` | `[ ConfigField ]` | user-editable values (below) |
+| `configuration` | `[ ConfigEntry ]` | settings of the tool's own config file an installing app or the user may set, by their real key there (below) |
 | `connection` | `{ policy, minLen, maxLen, url, webLogin }` | `policy`: `none` \| `open` \| `perConsumerKey`. `webLogin` (optional): `{ username, password }` for the tool's own web page, placeholders allowed (below) |
 | `createDirs` | `[ string ]` | created before start (tools that refuse a missing directory) |
 | `files` | `[ FileDef ]` | config files written before every start |
@@ -78,12 +79,16 @@ with no download and at `/platforms` for a download whose platform is not listed
 
 ```jsonc
 { "key": "downloadsDir", "label": "Downloads folder", "help": "...",
-  "kind": "text" | "password" | "path" | "bool" | "port",
+  "kind": "text" | "password" | "path" | "paths" | "bool" | "port",
   "required": false, "secret": false, "default": "{home}/Music/Tool",
   "tccSensitive": true,   // macOS: warn when under ~/Downloads|Documents|Desktop
   "createDir": true,      // path fields: create the directory before start
   "askOnInstall": true }  // a decision to make before the first install (see below)
 ```
+
+A `paths` field is a list of absolute folders (its `default` is a JSON array, usually `[]`).
+Clients send it as a JSON array; on the CLI, `--set key=` takes a JSON array or one path per
+line. Blank entries and repeats are dropped. The approval prompt lists the folders.
 
 `askOnInstall` marks the values a person has to decide before the tool is first installed — an
 account name, a folder. `required` fields are always asked. When the user clicks Install in
@@ -145,6 +150,36 @@ Two directives inside `content`:
 ```
 
 A `$if` without `else` that is false drops the key.
+
+## ConfigEntry (`configuration`)
+
+A `configuration` entry names a setting of the tool's own config file by its real key there, and
+Roadie writes the value straight into the file the recipe generates:
+
+```jsonc
+"configuration": [
+  { "entry": "shares.directories",   // dotted path inside the file — the tool's own setting name
+    "label": "Also share these folders", "help": "...",
+    "kind": "paths",                 // text | path | paths | bool | port (not password)
+    "default": [], "askOnInstall": true, "required": false,
+    "merge": "append",               // replace (default) | append (paths: added to the recipe's own list)
+    "file": "{data}/slskd.yml" }     // which files[].path; optional when the recipe writes one file
+]
+```
+
+- **The recipe decides what is open.** Anything not listed keeps the value the recipe's `files`
+  wrote, so an app can set `shares.directories` but not the web binding or the API keys.
+- It is a field like a `config` one, keyed by its entry path: stored under it, set under it
+  (`--set shares.directories=…`, `{ "config": { "shares.directories": [...] } }`), asked on install
+  and shown in the approval prompt the same way. It is not a `{config.…}` placeholder — the entry
+  places itself.
+- Roadie writes it after rendering the file: `replace` sets the key (creating missing levels),
+  `append` adds a `paths` value's folders to the list already there, skipping repeats. No value
+  stored leaves the file as the recipe wrote it.
+- Only `yaml` and `json` files, which have nested keys. A password can't be an entry: declare a
+  secret `config` field and place it with `{secrets.<key>}`.
+- Use it for what an installing app has reason to decide. Settings Roadie must control (ports,
+  bindings, keys, paths it owns) stay in `files`.
 
 ## HttpRequest
 

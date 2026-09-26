@@ -454,6 +454,16 @@ main {
   display: flex;
   gap: 6px;
 }
+.field-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.field-col textarea {
+  width: 100%;
+  font: inherit;
+}
 .field-help,
 .field-warn {
   font-size: 12px;

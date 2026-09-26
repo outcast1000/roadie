@@ -420,9 +420,11 @@ pub fn render_files(recipe: &Recipe, ctx: &Ctx) -> Result<Vec<RenderedFile>, Str
     recipe
         .files
         .iter()
-        .map(|f| {
+        .enumerate()
+        .map(|(i, f)| {
             let path = template::expand_string(&f.path, ctx)?;
-            let content = template::expand_value(&f.content, ctx)?;
+            let mut content = template::expand_value(&f.content, ctx)?;
+            recipe::apply_entries(recipe, i, &mut content, &ctx.config);
             let contents = recipe::emit::render(f.format, &content)?;
             Ok(RenderedFile { path, secret: f.secret, contents })
         })
@@ -1105,5 +1107,11 @@ mod tests {
         ctx.config.insert("shareDownloads".into(), Value::Bool(false));
         let y = render_files(&recipe, &ctx).unwrap().remove(0).contents;
         assert!(y.contains("shares:\n  directories: []\n"), "{y}");
+
+        // The app's folders join the downloads folder in one flat list.
+        ctx.config.insert("shareDownloads".into(), Value::Bool(true));
+        ctx.config.insert("shares.directories".into(), serde_json::json!(["D:\\Music", "E:\\Rock"]));
+        let y = render_files(&recipe, &ctx).unwrap().remove(0).contents;
+        assert!(y.contains("  directories:\n    - \"C:\\\\Users\\\\x\\\\Music\\\\Soulseek\"\n    - \"D:\\\\Music\"\n    - \"E:\\\\Rock\"\n"), "{y}");
     }
 }

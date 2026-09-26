@@ -124,6 +124,13 @@ fn show_value(v: &Value) -> String {
         Value::Bool(true) => "yes".into(),
         Value::Bool(false) => "no".into(),
         Value::String(s) => clean(s, 80),
+        // A folder list is what an app is asking to share or use: show every
+        // entry the dialog has room for, and say how many there are.
+        Value::Array(a) if a.iter().all(|v| v.is_string()) => {
+            let items: Vec<&str> = a.iter().filter_map(|v| v.as_str()).collect();
+            let head = if items.len() == 1 { "1 folder".to_string() } else { format!("{} folders", items.len()) };
+            clean(&format!("{head}: {}", items.join(", ")), 400)
+        }
         other => clean(&other.to_string(), 80),
     }
 }
@@ -151,7 +158,7 @@ fn filled(v: &Value) -> bool {
 
 /// Required install fields with no value anywhere: not `supplied` by the
 /// request, no recipe default, nothing already stored for the tool.
-pub fn missing_required<'a>(recipe: &'a Recipe, supplied: &dyn Fn(&str) -> bool, stored: &Map<String, Value>) -> Vec<&'a ConfigField> {
+pub fn missing_required(recipe: &Recipe, supplied: &dyn Fn(&str) -> bool, stored: &Map<String, Value>) -> Vec<ConfigField> {
     recipe
         .install_fields()
         .into_iter()
@@ -662,6 +669,12 @@ pub mod dialog {
 mod tests {
     use super::*;
     use crate::requests::RequestStatus;
+
+    #[test]
+    fn a_folder_list_reads_as_a_list_in_the_prompt() {
+        assert_eq!(show_value(&serde_json::json!(["/a", "/b"])), "2 folders: /a, /b");
+        assert_eq!(show_value(&serde_json::json!(["/a"])), "1 folder: /a");
+    }
 
     fn request(kind: RequestKind, by: &str) -> Request {
         Request { id: "r1".into(), kind, requested_by: by.into(), status: RequestStatus::Pending, created_at: 0, error: None, progress: None }
