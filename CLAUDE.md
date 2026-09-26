@@ -114,7 +114,10 @@ cd src-tauri && cargo test --no-default-features --target-dir target/cli        
   uninstall|autostart|connection|logs`, `recipe validate|dryrun`, `maintain [--at-login]`. It
   registers the consumer it names (`--consumer`, shown as `--as`), since the grant still needs
   the user's click. `tool connection <tool> --consumer <id>` asks once, then prints the URL and
-  that consumer's key.
+  that consumer's key (plus `webLogin` when the recipe declares one). **Its output is additive**:
+  apps that bundle the CLI follow the newest release through the `cli-latest` manifest (see
+  RELEASING.md), so a release may add commands, flags and JSON fields but never rename, remove or
+  repurpose one.
 - Where a request is shown is `prompt::surface()`: `window` in the desktop release (also
   `approvalSurface` in `/v1/health`), `dialog` in the CLI release (osascript / MessageBoxW /
   zenity or kdialog, text passed as arguments, never as script), `terminal` when the OS says

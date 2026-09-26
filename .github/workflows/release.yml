@@ -4,7 +4,9 @@
 #                     .app.tar.gz for macOS (Apple silicon and Intel), an NSIS
 #                     installer for Windows, and latest.json for its updater.
 #   cli-v0.2.0      → the standalone CLI: one `roadie` binary per platform,
-#                     SHA256SUMS, and manifest.json for apps that bundle it.
+#                     SHA256SUMS, and manifest.json for apps that bundle it;
+#                     the manifest is also copied to the fixed `cli-latest`
+#                     release, which apps following the newest CLI read.
 #
 # The version after the prefix must match every version file
 # (`node scripts/version.mjs --check`). Only desktop releases are marked
@@ -211,6 +213,40 @@ jobs:
           else
             gh release create "$TAG" dist-cli/* --title "Roadie CLI $VERSION" --notes-file notes.md --latest=false
           fi
+      # Apps that follow the newest CLI read one fixed address:
+      #   https://github.com/<repo>/releases/download/cli-latest/manifest.json
+      # `releases/latest` can't serve them — it is the desktop app's (its
+      # updater reads latest.json there) — so `cli-latest` is a prerelease that
+      # is never marked latest and carries only the newest CLI's manifest, whose
+      # URLs point into that version's own release. It only moves forward:
+      # rebuilding an older tag must not send every app back a version.
+      - name: Point cli-latest at this release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          current=""
+          if gh release view cli-latest >/dev/null 2>&1; then
+            current=$(curl -fsSL "https://github.com/${REPO}/releases/download/cli-latest/manifest.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).version||"")}catch{console.log("")}})') || current=""
+          fi
+          newer=$(CURRENT="$current" node -e '
+            const p = (v) => v.split(".").map(Number);
+            const [a, b] = [p(process.env.VERSION), p(process.env.CURRENT || "0.0.0")];
+            for (let i = 0; i < 3; i++) if (a[i] !== b[i]) { console.log(a[i] > b[i] ? "yes" : "no"); process.exit(0); }
+            console.log("same");')
+          echo "cli-latest is at ${current:-nothing}; this is ${VERSION} → ${newer}"
+          if [ "$newer" = "no" ]; then
+            echo "Not moving cli-latest back."
+            exit 0
+          fi
+          if ! gh release view cli-latest >/dev/null 2>&1; then
+            gh release create cli-latest --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "Roadie CLI (newest)" \
+              --notes "A fixed address for the newest CLI release's manifest.json, for apps that bundle the CLI and follow it. Not a release of its own: the manifest's URLs point into the versioned cli-v* release."
+          fi
+          gh release upload cli-latest dist-cli/manifest.json --clobber
 
   desktop:
     name: Desktop (${{ matrix.platform }})

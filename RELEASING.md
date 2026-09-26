@@ -69,9 +69,23 @@ Each CLI release carries a `manifest.json`:
 }
 ```
 
-The platform keys are Roadie's own recipe platform keys. An app pins a CLI tag, downloads the
-archive for its platform, checks the `sha256`, and ships the binary. Moving to a newer CLI means
-pinning a newer tag. The bundled binary reports its own version:
+The platform keys are Roadie's own recipe platform keys. An app downloads the archive for its
+platform, checks the `sha256`, and ships the binary. It can do that two ways:
+
+- **Follow the newest CLI.** Every CLI release also copies its `manifest.json` to a fixed
+  address, the `cli-latest` release:
+  `https://github.com/outcast1000/roadie/releases/download/cli-latest/manifest.json`.
+  `cli-latest` is a prerelease that is never marked "latest" (that stays the desktop app's), holds
+  nothing but that manifest, and only ever moves forward — rebuilding an older tag leaves it
+  alone. Its URLs point into the versioned `cli-v*` release. Viboplr reads it this way.
+- **Pin a tag.** Download from `releases/download/cli-v<version>/` and move on by pinning a newer
+  tag.
+
+Following is safe only because **the CLI's output is additive**: a release may add commands,
+flags and JSON fields, but never renames or removes one, or changes what an existing field
+means. A change that can't be made that way needs a new command next to the old one.
+
+The bundled binary reports its own version:
 
 ```bash
 roadie version      # {"version": "0.2.0", "release": "cli"}
