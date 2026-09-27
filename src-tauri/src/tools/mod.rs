@@ -109,7 +109,23 @@ pub struct ToolStatus {
     pub details: Map<String, Value>,
     pub reported_version: Option<String>,
     pub health_detail: Option<String>,
+    /// Where the installed release is unpacked (`…/tools/<name>/versions/<version>`);
+    /// none until installed.
+    pub install_dir: Option<String>,
+    /// The tool's private data dir: state, secrets and its rendered config.
+    pub data_dir: String,
     pub logs_dir: String,
+    /// The recipe's `files`, paths only, so an app can show the user where the
+    /// tool's configuration lives. Contents never travel here: `secret` marks a
+    /// file that holds secrets.
+    pub config_files: Vec<ConfigFile>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigFile {
+    pub path: String,
+    pub secret: bool,
 }
 
 struct Liveness {
@@ -331,6 +347,7 @@ pub fn status(recipe: &Recipe) -> ToolStatus {
         (Some(ctx), true) => Some(restart_allowed(recipe, ctx).err().unwrap_or(DeferReason::RestartNotAllowed)),
         _ => None,
     };
+    let install_dir = version.as_deref().map(|v| install::version_dir(&p, v).to_string_lossy().into_owned());
     let bin_path = (recipe.kind == Kind::Cli && installed)
         .then(|| shim_path(recipe).ok().map(|s| s.to_string_lossy().into_owned()))
         .flatten();
@@ -368,7 +385,10 @@ pub fn status(recipe: &Recipe) -> ToolStatus {
         details: lv.details,
         reported_version: lv.reported_version,
         health_detail: lv.health_detail,
+        install_dir,
+        data_dir: p.data.to_string_lossy().into_owned(),
         logs_dir: p.logs.to_string_lossy().into_owned(),
+        config_files: ctx.as_ref().map(|c| config_file_paths(recipe, c)).unwrap_or_default(),
     }
 }
 
@@ -407,7 +427,10 @@ fn unavailable(recipe: &Recipe, supported: bool) -> ToolStatus {
         details: Map::new(),
         reported_version: None,
         health_detail: None,
+        install_dir: None,
+        data_dir: String::new(),
         logs_dir: String::new(),
+        config_files: vec![],
     }
 }
 
@@ -435,6 +458,17 @@ pub fn render_files(recipe: &Recipe, ctx: &Ctx) -> Result<Vec<RenderedFile>, Str
             let contents = recipe::emit::render(f.format, &content)?;
             Ok(RenderedFile { path, secret: f.secret, contents })
         })
+        .collect()
+}
+
+/// Where the recipe's files live, without rendering their contents (a
+/// status read must stay cheap and never touch secrets). A path that fails
+/// to expand is left out rather than failing the status.
+pub fn config_file_paths(recipe: &Recipe, ctx: &Ctx) -> Vec<ConfigFile> {
+    recipe
+        .files
+        .iter()
+        .filter_map(|f| template::expand_string(&f.path, ctx).ok().map(|path| ConfigFile { path, secret: f.secret }))
         .collect()
 }
 
@@ -1220,5 +1254,14 @@ mod tests {
         ctx.config.insert("shares.directories".into(), serde_json::json!(["D:\\Music", "E:\\Rock"]));
         let y = render_files(&recipe, &ctx).unwrap().remove(0).contents;
         assert!(y.contains("  directories:\n    - \"C:\\\\Users\\\\x\\\\Music\\\\Soulseek\"\n    - \"D:\\\\Music\"\n    - \"E:\\\\Rock\"\n"), "{y}");
+    }
+    #[test]
+    fn status_names_the_config_files_by_path_only() {
+        let recipe = recipe::load_builtin().remove(0);
+        let mut ctx = Ctx::empty(Platform::current());
+        ctx.data = "/data".into();
+        assert_eq!(config_file_paths(&recipe, &ctx), vec![ConfigFile { path: "/data/slskd.yml".into(), secret: true }]);
+        let json = serde_json::to_value(ConfigFile { path: "/data/slskd.yml".into(), secret: true }).unwrap();
+        assert_eq!(json, serde_json::json!({ "path": "/data/slskd.yml", "secret": true }), "no contents, camelCase on the wire");
     }
 }

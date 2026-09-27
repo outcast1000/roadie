@@ -41,7 +41,13 @@ export interface ToolRow {
   details: Record<string, unknown>;
   reportedVersion: string | null;
   healthDetail: string | null;
+  /** Where the installed release is unpacked; null until installed. */
+  installDir: string | null;
+  /** The tool's private data dir (state, secrets, rendered config). */
+  dataDir: string;
   logsDir: string;
+  /** The recipe's config files, paths only; `secret` marks one holding secrets. */
+  configFiles: { path: string; secret: boolean }[];
   origin: Origin;
   trusted: boolean;
   submittedBy: string | null;
