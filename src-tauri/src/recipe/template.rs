@@ -8,6 +8,11 @@
 //! HTTP step stored. Filters: `|int` (emit as number), `|json`
 //! (JSON-string-quoted), `|shell` (single-quoted for a POSIX shell).
 //! `{{` and `}}` are literal braces.
+//!
+//! On Windows a result that is an absolute path (`C:\…`, `C:/…`, `\\server`)
+//! has its `/` turned into `\`, so `{config.dir}/.incomplete` comes out in one
+//! separator. Windows itself accepts a mixed path, but tools that check a path
+//! is normalized (slskd: `Path.GetFullPath(p) == p`) reject every file under it.
 
 use super::Platform;
 use serde_json::{Map, Value};
@@ -135,10 +140,30 @@ fn apply_filter(v: Value, filter: Option<&str>, path: &str) -> Result<Value, Str
     })
 }
 
+/// Is `s` an absolute Windows path: a drive (`C:\`, `C:/`) or a UNC share?
+fn is_windows_absolute(s: &str) -> bool {
+    let b = s.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
+        || s.starts_with("\\\\")
+        || s.starts_with("//")
+}
+
+/// On Windows, an absolute path in one separator. Anything else unchanged.
+fn localize(v: Value, ctx: &Ctx) -> Value {
+    match v {
+        Value::String(s) if ctx.platform.os == "windows" && is_windows_absolute(&s) => Value::String(s.replace('/', "\\")),
+        other => other,
+    }
+}
+
 /// Expand a string. A string that is exactly one placeholder keeps the
 /// resolved value's type (a bool stays a bool, `|int` yields a number);
 /// anything else interpolates to text.
 pub fn expand(s: &str, ctx: &Ctx) -> Result<Value, String> {
+    expand_raw(s, ctx).map(|v| localize(v, ctx))
+}
+
+fn expand_raw(s: &str, ctx: &Ctx) -> Result<Value, String> {
     let trimmed = s.trim();
     if trimmed.starts_with('{') && !trimmed.starts_with("{{") && trimmed.ends_with('}') && placeholders(trimmed).len() == 1 {
         let body = &trimmed[1..trimmed.len() - 1];
@@ -293,5 +318,27 @@ mod tests {
         assert_eq!(out["shares"], json!(["/Users/a b/Music"]));
         assert!(out.get("gone").is_none(), "false $if without else drops the key");
         assert_eq!(out["port"], json!(5030));
+    }
+
+    #[test]
+    fn windows_paths_come_out_in_one_separator() {
+        let mut c = ctx();
+        c.platform = Platform { os: "windows", arch: "x64" };
+        c.home = r"C:\Users\a b".into();
+        c.config.insert("dir".into(), json!(r"C:\Users\a b\Music"));
+        c.config.insert("mixed".into(), json!(r"C:\Users\a b/Music/Soulseek"));
+        c.config.insert("unc".into(), json!(r"\\nas\music"));
+        assert_eq!(expand("{config.dir}/.incomplete", &c).unwrap(), json!(r"C:\Users\a b\Music\.incomplete"));
+        assert_eq!(expand("{home}/Music/Soulseek", &c).unwrap(), json!(r"C:\Users\a b\Music\Soulseek"));
+        assert_eq!(expand("{config.mixed}", &c).unwrap(), json!(r"C:\Users\a b\Music\Soulseek"), "a value stored mixed is fixed on render");
+        assert_eq!(expand("{config.unc}/x", &c).unwrap(), json!(r"\\nas\music\x"));
+        // Not paths: left exactly as written.
+        assert_eq!(expand("http://127.0.0.1:{ports.web}/api", &c).unwrap(), json!("http://127.0.0.1:5030/api"));
+        assert_eq!(expand("--dir={config.dir}/x", &c).unwrap(), json!(r"--dir=C:\Users\a b\Music/x"));
+        assert_eq!(expand("{config.dir|json}", &c).unwrap(), json!(serde_json::to_string(r"C:\Users\a b\Music").unwrap()));
+        // On macOS nothing changes.
+        let mut mac = ctx();
+        mac.config.insert("mixed".into(), json!(r"C:\Users\a b/Music"));
+        assert_eq!(expand("{config.mixed}", &mac).unwrap(), json!(r"C:\Users\a b/Music"));
     }
 }

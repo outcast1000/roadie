@@ -140,6 +140,11 @@ Placeholders, in any string: `{home}` `{data}` `{bin}` `{version}` `{platform.os
 string. A string that is exactly one placeholder keeps the value's type (a bool stays a bool).
 `{{` and `}}` are literal braces.
 
+Write paths with `/` (`"{config.downloadsDir}/.incomplete"`). On Windows, a string that
+expands to an absolute path (`C:\…`, `\\server\…`) has every `/` turned into `\`, so it comes
+out in one separator — tools that insist a path is already normalized (slskd) reject a mixed
+one. A path in the middle of a string (`--dir={data}/x`) is left as written.
+
 Two directives inside `content`:
 
 ```jsonc

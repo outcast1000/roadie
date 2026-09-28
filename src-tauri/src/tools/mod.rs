@@ -1245,6 +1245,13 @@ mod tests {
         assert!(y.contains(&format!("  password: {}\n", serde_json::to_string("p#a:s\"s\\w'ord ü").unwrap())));
         assert!(y.contains("  listen_port: 50300\n"));
 
+        // slskd refuses every download whose incomplete path isn't already
+        // normalized, so on Windows the `/.incomplete` suffix must come out `\`.
+        let mut win = ctx.clone();
+        win.platform = Platform { os: "windows", arch: "x64" };
+        let y = render_files(&recipe, &win).unwrap().remove(0).contents;
+        assert!(y.contains(r#"  incomplete: "C:\\Users\\x\\Music\\Soulseek\\.incomplete""#), "{y}");
+
         ctx.config.insert("shareDownloads".into(), Value::Bool(false));
         let y = render_files(&recipe, &ctx).unwrap().remove(0).contents;
         assert!(y.contains("shares:\n  directories: []\n"), "{y}");
