@@ -38,13 +38,30 @@ pub fn run_client(root: &Path, argv_in: &[String]) -> Result<(i32, Value), Strin
         return validate_file(argv.get(2));
     }
     open(root)?;
+    let refresh = cmd == "catalog" || has(argv, "--refresh");
+    if !refresh && !cfg!(test) {
+        store::refresh_catalog_if_stale();
+    }
     let by: String = as_name.unwrap_or_else(|| "roadie CLI".into()).trim().chars().take(60).collect();
     let tool_arg = argv.get(2).map(|a| target(a)).transpose()?;
     let out = match (cmd, argv.get(1).map(String::as_str), tool_arg) {
         ("maintain", _, _) => maintain(root, has(argv, "--at-login")),
-        ("tool", Some("list"), _) => Ok((0, Value::Array(store::list().into_iter().map(|s| intake::public_status(tools::status(&s.recipe), &s)).collect()))),
+        ("tool", Some("list"), _) => {
+            if refresh {
+                if let Err(e) = store::refresh_catalog() {
+                    eprintln!("roadie: the recipe catalog could not be refreshed ({e}); listing the cached one");
+                }
+            }
+            Ok((0, Value::Array(store::list().into_iter().map(|s| intake::public_status(tools::status(&s.recipe), &s)).collect())))
+        }
+        ("catalog", Some("refresh"), _) => {
+            let r = store::refresh_catalog();
+            Ok((if r.is_ok() { 0 } else { 1 }, json!(crate::recipe::catalog::status())))
+        }
+        ("catalog", Some("status") | None, _) => Ok((0, json!(crate::recipe::catalog::status()))),
         ("tool", Some("status"), Some(t)) => known(&t).map(|(stored, m)| (0, annotate(intake::public_status(tools::status(&stored.recipe), &stored), m))),
         ("tool", Some(action @ ("start" | "stop" | "restart" | "check")), Some(t)) => act(&t, action),
+        ("tool", Some("options"), Some(t)) => options(&t),
         ("tool", Some("install"), Some(t)) => install(&t, argv, &by),
         ("tool", Some("upgrade" | "update"), Some(t)) => upgrade(&t, &by),
         ("tool", Some("uninstall"), Some(t)) => match intake::uninstall(&t.name, has(argv, "--keep-data")) {
@@ -103,6 +120,19 @@ fn known(t: &Target) -> Result<(store::Stored, Option<bool>), String> {
     Ok((stored, matches))
 }
 
+/// What an install can be given: the recipe file's own options when the
+/// client names its file, else the stored (or catalog) recipe's.
+fn options(t: &Target) -> Result<(i32, Value), String> {
+    let recipe = match &t.recipe {
+        Some(v) => match crate::recipe::from_value(v.clone()) {
+            Ok(r) => r,
+            Err(errors) => return Ok((1, json!({ "ok": false, "errors": errors }))),
+        },
+        None => store::get(&t.name).ok_or_else(|| format!("unknown tool: {}", t.name))?.recipe,
+    };
+    Ok((0, intake::options(&recipe)))
+}
+
 fn act(t: &Target, action: &str) -> Result<(i32, Value), String> {
     let (stored, m) = known(t)?;
     let recipe = match intake::trusted(&t.name) {
@@ -138,7 +168,12 @@ fn install(t: &Target, argv: &[String], by: &str) -> Result<(i32, Value), String
         ensure_consumer(c, by)?;
     }
     match intake::install(&t.name, intake::InstallAsk { values, consumer, recipe: t.recipe.clone() }) {
-        Ok(plan) => ask(requests::create(plan.kind, by)),
+        Ok(plan) => {
+            if let Some(o) = &plan.other_instance {
+                eprintln!("roadie: {}", o.message);
+            }
+            ask(requests::create(plan.kind, by))
+        }
         Err(r) => Ok(refused(r)),
     }
 }
@@ -401,6 +436,15 @@ pub(super) mod tests {
     fn root() -> std::path::PathBuf {
         let r = std::env::temp_dir().join(format!("roadie-cli-local-{}", std::process::id()));
         std::fs::create_dir_all(&r).unwrap();
+        // The recipes a user who installed them before the catalog has:
+        // trusted, from the catalog.
+        static SEED: std::sync::Once = std::sync::Once::new();
+        SEED.call_once(|| {
+            paths::init(r.clone());
+            for recipe in crate::recipe::fixtures::all() {
+                store::put_trusted(recipe, store::RecipeSource::Catalog).unwrap();
+            }
+        });
         r
     }
 
@@ -412,7 +456,7 @@ pub(super) mod tests {
     /// yt-dlp for another platform only, under a new name: approving it
     /// trusts the recipe, then fails at install without the network.
     fn elsewhere_recipe(name: &str) -> std::path::PathBuf {
-        let mut r: Value = serde_json::from_str(crate::recipe::BUILTIN.iter().find(|(n, _)| *n == "yt-dlp").unwrap().1).unwrap();
+        let mut r: Value = serde_json::from_str(crate::recipe::fixtures::json("yt-dlp")).unwrap();
         let other = if crate::recipe::Platform::current().key().starts_with("darwin") { "windows-x64" } else { "darwin-arm64" };
         let asset = r["source"]["assets"][other].clone();
         r["name"] = json!(name);
@@ -448,6 +492,88 @@ pub(super) mod tests {
         let (code, out) = run(&["tool", "upgrade", file]);
         assert_eq!(code, 1, "not installed: {out}");
         let _ = store::delete("cli-local-demo");
+    }
+
+    #[test]
+    fn a_catalog_tool_installs_after_one_dialog_and_offers_recipe_updates() {
+        let _s = serial();
+        let _c = crate::recipe::catalog::tests::serial();
+        root();
+        let file = elsewhere_recipe("cli-local-cat");
+        let v1 = crate::recipe::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        crate::recipe::catalog::tests::publish(std::slice::from_ref(&v1));
+
+        let (code, out) = run(&["tool", "status", "cli-local-cat"]);
+        assert_eq!((code, out["origin"].as_str(), out["available"].as_bool(), out["installed"].as_bool()), (0, Some("catalog"), Some(true), Some(false)), "{out}");
+
+        answer_next(false);
+        let (code, _) = run(&["--as", "Test App", "tool", "install", "cli-local-cat"]);
+        assert_eq!(code, 2, "declined");
+        assert_eq!(store::get("cli-local-cat").map(|s| s.origin), Some(store::Origin::Catalog), "declining trusts nothing");
+
+        answer_next(true);
+        let (code, out) = run(&["--as", "Test App", "tool", "install", "cli-local-cat"]);
+        assert_eq!(code, 1, "approved, then the wrong platform fails: {out}");
+        let s = store::get("cli-local-cat").unwrap();
+        assert_eq!((s.origin, s.source), (store::Origin::User, store::RecipeSource::Catalog), "the one dialog trusted the catalog's recipe");
+
+        let mut v2 = v1.clone();
+        v2.revision += 1;
+        crate::recipe::catalog::tests::publish(&[v2]);
+        let (code, out) = run(&["tool", "status", "cli-local-cat"]);
+        assert_eq!((code, out["recipeUpdate"]["revision"].as_u64()), (0, Some(u64::from(v1.revision) + 1)), "{out}");
+        let (code, out) = run(&["tool", "upgrade", "cli-local-cat"]);
+        assert_eq!(code, 1, "not installed, so nothing to update: {out}");
+
+        crate::recipe::catalog::tests::publish(&[]);
+        let _ = store::delete("cli-local-cat");
+    }
+
+    /// The client's flow: it has the recipe file (downloaded from the
+    /// catalog), lists the options to show its user, then asks to install
+    /// with the values the user chose; one dialog approves.
+    #[test]
+    fn a_client_lists_options_then_installs_with_its_values() {
+        let _s = serial();
+        root();
+        let mut r: Value = serde_json::from_str(crate::recipe::fixtures::json("slskd@6")).unwrap();
+        let other = if crate::recipe::Platform::current().key().starts_with("darwin") { "windows-x64" } else { "darwin-arm64" };
+        let asset = r["source"]["assets"][other].clone();
+        r["name"] = json!("cli-flow");
+        r["platforms"] = json!([other]);
+        r["source"]["assets"] = json!({ other: asset });
+        let file = root().join("cli-flow.json");
+        std::fs::write(&file, serde_json::to_string(&r).unwrap()).unwrap();
+        let file = file.to_str().unwrap();
+
+        let (code, out) = run(&["tool", "options", file]);
+        assert_eq!(code, 0, "{out}");
+        let keys: Vec<&str> = out["options"].as_array().unwrap().iter().map(|o| o["key"].as_str().unwrap()).collect();
+        assert!(["soulseekUsername", "ports.web", "secrets.internalKey", "installDir", "startNow"].iter().all(|k| keys.contains(k)), "{keys:?}");
+
+        let required: Vec<&str> = out["options"].as_array().unwrap().iter().filter(|o| o["required"] == true).map(|o| o["key"].as_str().unwrap()).collect();
+        assert_eq!(required, vec!["soulseekUsername", "soulseekPassword"]);
+
+        // A dialog cannot ask for values: without the required ones, refused, naming them.
+        let (code, out) = run(&["--as", "Flow App", "tool", "install", file, "--set", "soulseekUsername=bj"]);
+        assert_eq!(code, 3, "a missing required value is the caller's to fix: {out}");
+        assert!(out.to_string().contains("soulseekPassword"), "{out}");
+
+        answer_next(true);
+        let key = "a-key-the-client-chose-1234";
+        let (code, out) = run(&[
+            "--as", "Flow App", "tool", "install", file, "--set", "soulseekUsername=bj", "--set", "soulseekPassword=pw", "--set", "ports.web=6123",
+            "--set", &format!("secrets.internalKey={key}"), "--set", "startNow=false",
+        ]);
+        assert_eq!(code, 1, "approved, then this platform has no build: {out}");
+        assert!(!out.to_string().contains(key) && !out.to_string().contains("\"pw\""), "the chosen key and the password are never printed");
+        let p = paths::tool_paths("cli-flow").unwrap();
+        let st = tools::state::load(&p.data);
+        assert_eq!((st.ports.get("web"), st.secrets.get("internalKey").map(String::as_str), st.config.get("soulseekUsername")), (Some(&6123), Some(key), Some(&json!("bj"))), "the client's values landed");
+        let (_, status) = run(&["tool", "status", "cli-flow"]);
+        assert!(status["installing"].is_null(), "no install running once it ended: {status}");
+        let _ = tools::uninstall(&crate::recipe::parse(&serde_json::to_string(&r).unwrap()).unwrap(), false);
+        let _ = store::delete("cli-flow");
     }
 
     #[test]

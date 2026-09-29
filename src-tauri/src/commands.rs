@@ -77,6 +77,11 @@ pub async fn tool_update(name: String) -> Result<Value, String> {
 pub async fn tool_web_login(name: String) -> Result<Value, String> {
     relay("GET", format!("/v1/owner/tools/{}/web-login", enc(&name)), None, true).await
 }
+/// The user clicked "Show key": the secrets they may see, on demand only.
+#[tauri::command]
+pub async fn tool_secrets(name: String) -> Result<Value, String> {
+    relay("GET", format!("/v1/owner/tools/{}/secrets", enc(&name)), None, true).await
+}
 #[tauri::command]
 pub async fn tool_uninstall(name: String, keep_data: bool) -> Result<(), String> {
     relay("DELETE", format!("/v1/owner/tools/{}?keepData={keep_data}", enc(&name)), None, true).await.map(|_| ())
@@ -125,6 +130,17 @@ pub async fn recipe_delete(name: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn recipe_dry_run(name: String, recipe: Option<Value>) -> Result<Value, String> {
     relay("POST", format!("/v1/recipes/{}/dryrun", enc(&name)), recipe.map(|r| serde_json::json!({ "recipe": r })), false).await
+}
+
+/// The file and GitHub link for proposing a trusted recipe to the catalog.
+/// The window opens the link; nothing is submitted from here.
+#[tauri::command]
+pub async fn recipe_submission(name: String) -> Result<Value, String> {
+    relay("GET", format!("/v1/recipes/{}/submission", enc(&name)), None, false).await
+}
+#[tauri::command]
+pub async fn catalog_refresh() -> Result<Value, String> {
+    relay("POST", "/v1/catalog/refresh".into(), None, false).await
 }
 
 // --- Consumers + requests ---
@@ -239,11 +255,14 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         tool_open_logs,
         tool_open_url,
         tool_web_login,
+        tool_secrets,
         recipe_list,
         recipe_get,
         recipe_trust,
         recipe_delete,
         recipe_dry_run,
+        recipe_submission,
+        catalog_refresh,
         consumer_list,
         consumer_revoke,
         request_list,

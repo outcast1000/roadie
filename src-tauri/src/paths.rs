@@ -46,10 +46,15 @@ pub struct ToolPaths {
     pub logs: PathBuf,
 }
 
+/// Holds the install folder the app or user chose for a tool, when not
+/// the default `<tool>/versions`.
+pub const INSTALL_DIR_FILE: &str = "install-dir";
+
 pub fn tool_paths(name: &str) -> Result<ToolPaths, String> {
     let root = data_root()?.join("tools").join(name);
+    let chosen = std::fs::read_to_string(root.join(INSTALL_DIR_FILE)).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
     Ok(ToolPaths {
-        versions: root.join("versions"),
+        versions: chosen.map(PathBuf::from).unwrap_or_else(|| root.join("versions")),
         data: root.join("data"),
         logs: root.join("logs"),
         root,

@@ -91,6 +91,38 @@ test("write_recipe forwards validation errors with pointers", async () => {
   assert.match(reply.result.content[0].text, /\/version\/regex/);
 });
 
+test("submit_recipe returns the hand-off payload and refuses drafts", async () => {
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, "roadie-api.json"), JSON.stringify({ port: 47630, token: "a".repeat(64) }));
+  const payload = { name: "demo", repo: "outcast1000/roadie-recipes", path: "recipes/demo.json", file: "{}\n", isUpdate: false, revision: 1, submitUrl: "https://github.com/outcast1000/roadie-recipes/new/main?filename=recipes%2Fdemo.json&value=%7B%7D", clipboardFallback: false };
+  const f = fakeFetch(47630, {
+    "GET /v1/recipes/demo/submission": [200, payload],
+    "GET /v1/recipes/draft/submission": [409, { error: "draft is a draft: the user must review and Trust it in Roadie before it can be submitted" }],
+  });
+  const api = new Api(dir, f);
+  const out = await callTool(api, "submit_recipe", { name: "demo" });
+  assert.deepEqual(out, payload, "the payload as the API gives it; nothing is submitted");
+  assert.ok(!f.calls.some((c) => c.method !== "GET"), "submit_recipe only reads");
+  const reply = await handleMessage({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "submit_recipe", arguments: { name: "draft" } } }, { api });
+  assert.equal(reply.result.isError, true);
+  assert.match(reply.result.content[0].text, /Trust/);
+  const init = await handleMessage({ jsonrpc: "2.0", id: 9, method: "initialize", params: {} }, { api });
+  assert.match(init.result.instructions, /submit_recipe/);
+  assert.match(init.result.instructions, /never holds a GitHub credential/);
+});
+
+test("install_options reads the options, public for a known tool and with the app's recipe", async () => {
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, "roadie-api.json"), JSON.stringify({ port: 47630, token: "a".repeat(64) }));
+  const opts = { tool: "slskd", options: [{ key: "ports.web", default: 5030, required: false }] };
+  const f = fakeFetch(47630, { "GET /v1/tools/slskd/options": [200, opts], "POST /v1/tools/slskd/options": [200, opts] });
+  const api = new Api(dir, f);
+  assert.deepEqual(await callTool(api, "install_options", { name: "slskd" }), opts);
+  assert.equal(f.calls.find((c) => c.method === "GET" && c.url === "/v1/tools/slskd/options").headers.Authorization, undefined, "no token needed");
+  await callTool(api, "install_options", { name: "slskd", recipe: { name: "slskd" } });
+  assert.deepEqual(JSON.parse(f.calls.find((c) => c.method === "POST").body), { recipe: { name: "slskd" } });
+});
+
 test("get_connection keeps the key out unless includeSecret", async () => {
   const dir = tmp();
   fs.writeFileSync(path.join(dir, "roadie-api.json"), JSON.stringify({ port: 47630, token: "a".repeat(64) }));

@@ -54,15 +54,17 @@ mod const_format_usage {
         ($extra:literal, $options:literal) => {
             concat!(
                 "usage:\n",
-                "  roadie tool list\n",
+                "  roadie tool list [--refresh]             (--refresh: fetch the recipe catalog first)\n",
                 "  roadie tool status|check <tool>          (check: look for a newer release)\n",
                 "  roadie tool start|stop|restart <tool>\n",
+                "  roadie tool options <tool>              (every value an install can be given: required or not, default, generated)\n",
                 "  roadie tool install <tool> [--set key=value]... [--consumer <id>] [--wait]\n",
                 "                              (--consumer: one approval installs and grants that app its key)\n",
                 "  roadie tool upgrade <tool> [--wait]      (alias: update)\n",
                 "  roadie tool uninstall <tool> [--keep-data] [--wait]\n",
                 "  roadie recipe validate <file>           (offline; errors name a JSON pointer)\n",
                 "  roadie recipe dryrun <tool>             (resolve and render; downloads and writes nothing)\n",
+                "  roadie catalog [status|refresh]         (the recipe catalog Roadie installs new tools from)\n",
                 $extra,
                 "  <tool> is a recipe name or the path of a recipe file (.json) your app ships. install and\n",
                 "  upgrade send the file along: a new or changed recipe is shown to the user to review and trust.\n",
@@ -351,7 +353,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("roadie-cli-target-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let good = dir.join("ffmpeg.json");
-        std::fs::write(&good, crate::recipe::BUILTIN.iter().find(|(n, _)| *n == "ffmpeg").unwrap().1).unwrap();
+        std::fs::write(&good, crate::recipe::fixtures::json("ffmpeg")).unwrap();
         let t = target(good.to_str().unwrap()).unwrap();
         assert_eq!(t.name, "ffmpeg");
         assert!(t.recipe.is_some());

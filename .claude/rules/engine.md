@@ -87,9 +87,34 @@ there first.
 - **Windows** paths are code-complete but only the owner can test them; say when a change
   touches `#[cfg(windows)]` code.
 
+- **Options** (`intake::options`) are the one list of what an install takes, the same for the
+  CLI, the API and MCP. Any port or secret may be given (`askOnInstall` only drives Roadie's
+  prompt). A secret without `generate` is required: `intake::install` refuses without it where
+  nothing can ask, and `require_secrets` refuses at approval.
+- **Another copy** (`other_instance`): before install, the recipe's own health check on the
+  ports the install would use (and, for a `singleton`, the defaults). An answer that rejects
+  Roadie's key means another copy. It is a warning in options, the dry run, the install reply and
+  the prompt, never a block, and Roadie never stops the other copy. It stays quiet while Roadie's
+  own copy is the one running.
+- **Install progress** is also a marker, `<data>/installing.json` (`tools::install` writes it
+  and always removes it). `status.installing` reads it in any process and ignores a marker
+  whose pid is dead.
+- **Choices at install** (`install_options` → `apply_install_choices`, before the first
+  install): `installDir` is written to `<tool>/install-dir`, which `paths::tool_paths` reads, so
+  every path helper follows it. It must be new or empty, since uninstall removes it. `ports.<name>`
+  go into `ToolState.chosen_ports`, which `choose_ports` never moves. `secrets.<key>` are kept
+  as given (`fill` only regenerates an `askOnInstall` secret shorter than `minLen`).
+- **`writeOnce` files** are rendered only when absent (`write_files`). Once one exists
+  (`files_frozen`), ports stop moving and the chosen values it carries are refused a change. When
+  every file is `writeOnce` (`settings_frozen`), `configure` with a patch errors and status says
+  `configurable: false`.
+- **Connection policies**: `perConsumerKey` re-renders the config on every grant change
+  (`refresh_consumers`). `sharedKey` and `open` have nothing to re-render, and
+  `intake::consumer_connection` hands out the secret `connection.key` names.
+
 ## Adding a capability
 
 New engine behaviour is driven by a new recipe field: type in `recipe/mod.rs`, validation with a
-pointer, a line in `recipes/SCHEMA.md`, use in the interpreter, a built-in that exercises it, a
-unit test. `archive: tgz` is declared but not implemented yet (returns an error) — the first
+pointer, a line in `recipes/SCHEMA.md`, use in the interpreter, a recipe that exercises it (a
+fixture, then the catalog), a unit test. `archive: tgz` is declared but not implemented yet (returns an error) — the first
 recipe that needs it adds `tar`+`flate2` and a traversal test.

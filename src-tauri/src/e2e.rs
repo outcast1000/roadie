@@ -35,6 +35,7 @@ mod tests {
             std::fs::create_dir_all(&root).unwrap();
             paths::init(root.clone());
             recipe::store::load_all();
+            recipe::store::refresh_catalog().expect("the recipe catalog answers");
             let r2 = root.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -166,7 +167,9 @@ mod tests {
         let (_, pending) = r.client("GET", &format!("/v1/requests/{id}"), None);
         assert_eq!(pending["consumer"], "viboplr");
         assert_eq!(pending["requestedBy"], "Viboplr");
+        assert_eq!((created["recipeChange"].as_str(), pending["recipeSource"].as_str()), (Some("new"), Some("catalog")), "the catalog's recipe rides in the request: {pending}");
         assert_eq!(r.tool()["installed"], false, "nothing installs before the click");
+        assert_eq!(r.tool()["trusted"], false, "nor is the catalog's recipe trusted before it");
 
         // 3. The user clicks Install. One click: install + start + grant.
         let decided = r.user_decides(&id, true);
@@ -175,6 +178,7 @@ mod tests {
         assert_eq!(after["status"], "done");
         let t = r.wait_healthy(true);
         assert_eq!(t["installed"], true);
+        assert_eq!((t["trusted"].as_bool(), t["source"].as_str()), (Some(true), Some("catalog")), "the click trusted the catalog's recipe: {t}");
         assert!(t["version"].as_str().is_some_and(|v| !v.is_empty()));
         assert_eq!(t["autostart"], false);
         assert!(t["approvedConsumers"].as_array().unwrap().iter().any(|c| c == "viboplr"), "{t}");

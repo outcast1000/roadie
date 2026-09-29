@@ -34,10 +34,11 @@ Viboplr-specific code paths. Viboplr is one consumer among any.
 
 ## The four rules everything hangs on
 
-1. **Every tool is a recipe, never Rust.** `recipes/*.json` describe a tool declaratively and
+1. **Every tool is a recipe, never Rust.** Recipes describe a tool declaratively; they live in
+   the catalog repo `outcast1000/roadie-recipes` (Roadie ships none, `recipe/catalog.rs`) and
    `src-tauri/src/tools/` interprets them. A tool needing something new gets a new *generic*
    recipe field (schema in `recipes/SCHEMA.md`, validator in `src-tauri/src/recipe/mod.rs`, a
-   built-in that uses it, a test). Never add `if recipe.name == "slskd"`. Recipes are also what
+   recipe that uses it, a test). Never add `if recipe.name == "slskd"`. Recipes are also what
    AI assistants author through the API and MCP, so validation errors must name a JSON pointer
    and a fix.
 2. **Nothing installs without the user's click.** Install and uninstall are *requests*
@@ -140,8 +141,8 @@ cd src-tauri && cargo test --no-default-features --target-dir target/cli        
 
 | Path | What |
 |---|---|
-| `recipes/` | built-in recipes (compiled in with `include_str!` in `recipe/mod.rs` → `BUILTIN`) + `SCHEMA.md` |
-| `src-tauri/src/recipe/` | recipe types + validator, `template.rs` (placeholders, `$each`, `$if`), `emit.rs` (yaml/json/env/ini), `jsonq.rs`, `httpsteps.rs`, `store.rs` (builtin/user/draft) |
+| `recipes/SCHEMA.md` | the recipe format (served by `GET /v1/recipes/schema`); the recipes themselves are in `outcast1000/roadie-recipes` |
+| `src-tauri/src/recipe/` | recipe types + validator, `template.rs` (placeholders, `$each`, `$if`), `emit.rs` (yaml/json/env/ini), `jsonq.rs`, `httpsteps.rs`, `catalog.rs` (fetch + cache the catalog), `store.rs` (user/draft/catalog), `fixtures/` (test-only recipes) |
 | `src-tauri/src/tools/` | the interpreter: `mod.rs` (status, liveness, install/start/stop/configure, reconcile, auto-update, dry run), `install.rs`, `process.rs`, `autostart.rs`, `state.rs`, `probe.rs` |
 | `src-tauri/src/api/` | axum local API: public tier, bearer tier (incl. `/v1/events` long-poll), owner tier, requests, recipes, consumers |
 | `src-tauri/src/{service,owner,client}.rs` | `service` feature only: the service entry point; the owner channel; the window's HTTP client + event pump |
@@ -170,6 +171,11 @@ cd src-tauri && cargo test --no-default-features --target-dir target/cli        
   all hand-rolled on purpose; `serde_json` has `preserve_order` so emitted files keep the
   recipe author's key order.
 - Add CORS to the API, or accept a `Host` that is not loopback.
+- Hold a GitHub credential or open a pull request from Roadie. Submitting a recipe to the
+  catalog is a hand-off (`intake::submission`): the window opens GitHub for the user, and the
+  MCP returns the file for the assistant's own GitHub access.
+- Ship a recipe in the binary, or trust a catalog recipe without the user's click. The catalog
+  is unsigned; `recipe/legacy.rs` (migration only, removed in 0.8.0) is the one exception.
 
 ## Rules (path-scoped, in `.claude/rules/`)
 

@@ -112,6 +112,15 @@ pub struct ToolStatus {
     /// Where the installed release is unpacked (`…/tools/<name>/versions/<version>`);
     /// none until installed.
     pub install_dir: Option<String>,
+    /// An install running now (in this or another process): `{phase,
+    /// downloaded, total, updatedAt}`; phase `resolving` before the download.
+    pub installing: Option<Value>,
+    /// Where releases are unpacked (`installDir`, or the default), installed
+    /// or not: the install prompt shows it.
+    pub versions_dir: String,
+    /// False once the tool owns its configuration (every file `writeOnce`
+    /// and written): Roadie's settings no longer apply.
+    pub configurable: bool,
     /// The tool's private data dir: state, secrets and its rendered config.
     pub data_dir: String,
     pub logs_dir: String,
@@ -185,6 +194,60 @@ pub fn web_login(recipe: &Recipe) -> Result<Option<Value>, String> {
         "username": template::expand_string(&w.username, &ctx)?,
         "password": template::expand_string(&w.password, &ctx)?,
     })))
+}
+
+/// Another copy of the tool already running here, found before Roadie's
+/// own copy runs: something answers the recipe's health check on a port the
+/// install would use but rejects Roadie's key (or accepts any). Roadie never
+/// fights it; clients and the prompt say so before the user installs.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OtherInstance {
+    /// Where it answers (the recipe's connection URL on that port).
+    pub url: String,
+    /// `singleton`: Roadie's copy will not start at all while it runs.
+    /// Otherwise only the port is taken.
+    pub blocks_start: bool,
+    pub message: String,
+}
+
+/// Look for another copy on the ports the install would use (`chosen` over
+/// the defaults) and, for a `singleton`, on the default ports too. `None`
+/// while Roadie's own copy is the one running, or when nothing answers.
+pub fn other_instance(recipe: &Recipe, chosen: &std::collections::BTreeMap<String, u16>) -> Option<OtherInstance> {
+    if recipe.kind != Kind::Daemon || recipe.health.is_none() {
+        return None;
+    }
+    let p = paths::tool_paths(&recipe.name).ok()?;
+    let st = state::preview(recipe, &p.data, &Platform::current());
+    if install::current_version(recipe, &p).is_some() && build_ctx(recipe, &st, &p).is_ok_and(|ctx| liveness(recipe, &st, &p, &ctx).running) {
+        return None;
+    }
+    let mut planned = st.ports.clone();
+    planned.extend(chosen.iter().map(|(k, v)| (k.clone(), *v)));
+    let mut candidates = vec![planned];
+    if recipe.singleton {
+        let defaults: std::collections::BTreeMap<String, u16> = recipe.ports.iter().map(|(k, d)| (k.clone(), d.default)).collect();
+        if !candidates.contains(&defaults) {
+            candidates.push(defaults);
+        }
+    }
+    let name = &recipe.display_name;
+    for ports in candidates {
+        let mut s = st.clone();
+        s.ports = ports;
+        let Ok(ctx) = build_ctx(recipe, &s, &p) else { continue };
+        if matches!(probe_health(recipe, &ctx), Health::Unauthorized | Health::Ok { .. }) {
+            let url = ctx.connection_url.clone().unwrap_or_else(|| format!("{:?}", s.ports));
+            let message = if recipe.singleton {
+                format!("Another {name} is already running on this computer ({url}). {name} runs one copy per computer, so Roadie's copy will not start until that one is quit.")
+            } else {
+                format!("Something already answers on {url}. Roadie's {name} cannot start on that port while it runs: choose another port, or quit it.")
+            };
+            return Some(OtherInstance { url, blocks_start: recipe.singleton, message });
+        }
+    }
+    None
 }
 
 fn probe_health(recipe: &Recipe, ctx: &Ctx) -> Health {
@@ -386,6 +449,9 @@ pub fn status(recipe: &Recipe) -> ToolStatus {
         reported_version: lv.reported_version,
         health_detail: lv.health_detail,
         install_dir,
+        installing: installing(&p),
+        versions_dir: p.versions.to_string_lossy().into_owned(),
+        configurable: !ctx.as_ref().is_some_and(|c| settings_frozen(recipe, c)),
         data_dir: p.data.to_string_lossy().into_owned(),
         logs_dir: p.logs.to_string_lossy().into_owned(),
         config_files: ctx.as_ref().map(|c| config_file_paths(recipe, c)).unwrap_or_default(),
@@ -428,6 +494,9 @@ fn unavailable(recipe: &Recipe, supported: bool) -> ToolStatus {
         reported_version: None,
         health_detail: None,
         install_dir: None,
+        installing: None,
+        versions_dir: String::new(),
+        configurable: true,
         data_dir: String::new(),
         logs_dir: String::new(),
         config_files: vec![],
@@ -472,7 +541,20 @@ pub fn config_file_paths(recipe: &Recipe, ctx: &Ctx) -> Vec<ConfigFile> {
         .collect()
 }
 
-/// Create the recipe's directories and (re)write its config files.
+/// True once a `writeOnce` file exists: from then on the tool owns it, and
+/// anything it carries (ports, keys) must not change under it.
+fn files_frozen(recipe: &Recipe, ctx: &Ctx) -> bool {
+    recipe.files.iter().filter(|f| f.write_once).any(|f| template::expand_string(&f.path, ctx).is_ok_and(|path| std::path::Path::new(&path).exists()))
+}
+
+/// After install, every config file is the tool's: Roadie's settings no
+/// longer reach it.
+fn settings_frozen(recipe: &Recipe, ctx: &Ctx) -> bool {
+    !recipe.files.is_empty() && recipe.files.iter().all(|f| f.write_once) && files_frozen(recipe, ctx)
+}
+
+/// Create the recipe's directories and (re)write its config files. A
+/// `writeOnce` file that exists is the tool's and is left alone.
 fn write_files(recipe: &Recipe, ctx: &Ctx) -> Result<(), String> {
     for f in recipe.config.iter().filter(|f| f.create_dir) {
         if let Some(Value::String(dir)) = ctx.config.get(&f.key) {
@@ -483,8 +565,12 @@ fn write_files(recipe: &Recipe, ctx: &Ctx) -> Result<(), String> {
         let dir = template::expand_string(d, ctx)?;
         std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir}: {e}"))?;
     }
-    for rf in render_files(recipe, ctx)? {
-        paths::write_atomic(&PathBuf::from(&rf.path), rf.contents.as_bytes(), rf.secret)?;
+    for (f, rf) in recipe.files.iter().zip(render_files(recipe, ctx)?) {
+        let path = PathBuf::from(&rf.path);
+        if f.write_once && path.exists() {
+            continue;
+        }
+        paths::write_atomic(&path, rf.contents.as_bytes(), rf.secret)?;
     }
     Ok(())
 }
@@ -493,7 +579,10 @@ fn write_files(recipe: &Recipe, ctx: &Ctx) -> Result<(), String> {
 /// after the default. A *foreign* instance on the port is left in place and
 /// reported by liveness.
 fn choose_ports(recipe: &Recipe, st: &mut ToolState, p: &ToolPaths) -> Result<(), String> {
-    for (name, def) in recipe.ports.iter().filter(|(_, d)| d.pick) {
+    if files_frozen(recipe, &build_ctx(recipe, st, p)?) {
+        return Ok(());
+    }
+    for (name, def) in recipe.ports.iter().filter(|(n, d)| d.pick && !st.chosen_ports.contains(*n)) {
         let port = *st.ports.get(name).unwrap_or(&def.default);
         if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
             st.ports.insert(name.clone(), port);
@@ -505,7 +594,9 @@ fn choose_ports(recipe: &Recipe, st: &mut ToolState, p: &ToolPaths) -> Result<()
                 st.ports.insert(name.clone(), port);
             }
             _ => {
-                let picked = (def.default + 1..=def.default + 10).find(|q| std::net::TcpListener::bind(("127.0.0.1", *q)).is_ok());
+                // Never a port another of this tool's ports already has.
+                let taken: Vec<u16> = st.ports.iter().filter(|(n, _)| *n != name).map(|(_, p)| *p).collect();
+                let picked = (def.default + 1..=def.default + 10).find(|q| !taken.contains(q) && std::net::TcpListener::bind(("127.0.0.1", *q)).is_ok());
                 match picked {
                     Some(q) => {
                         st.ports.insert(name.clone(), q);
@@ -582,7 +673,46 @@ pub type Progress<'a> = &'a mut dyn FnMut(install::Phase, u64, Option<u64>);
 
 /// Install (nothing current) or fetch-and-stage the latest release. Applies
 /// immediately when the daemon is stopped or idle; otherwise stays staged.
+/// While an install runs, `<data>/installing.json` says how far it got, so
+/// `status` in any process (a client polling the CLI) can report it.
+const INSTALLING_FILE: &str = "installing.json";
+
+/// Install or update, reporting progress to `progress` and to status
+/// (`installing`) until it finishes, either way.
 pub fn install(recipe: &Recipe, progress: Progress) -> Result<ToolStatus, String> {
+    let marker = paths::tool_paths(&recipe.name).ok().map(|p| p.data.join(INSTALLING_FILE));
+    let write = |phase: Value, downloaded: u64, total: Option<u64>| {
+        if let Some(m) = &marker {
+            let v = serde_json::json!({ "phase": phase, "downloaded": downloaded, "total": total, "pid": std::process::id(), "updatedAt": paths::now_secs() });
+            let _ = paths::write_atomic(m, v.to_string().as_bytes(), false);
+        }
+    };
+    write(Value::String("resolving".into()), 0, None);
+    let mut last = std::time::Instant::now();
+    let mut both = |phase: install::Phase, done: u64, total: Option<u64>| {
+        if last.elapsed() >= Duration::from_millis(250) || Some(done) == total {
+            write(serde_json::to_value(phase).unwrap_or_default(), done, total);
+            last = std::time::Instant::now();
+        }
+        progress(phase, done, total);
+    };
+    let out = install_locked(recipe, &mut both);
+    if let Some(m) = &marker {
+        let _ = std::fs::remove_file(m);
+    }
+    out
+}
+
+/// An install in progress, from its marker; a marker whose process is gone
+/// (a crash) is not one.
+fn installing(p: &ToolPaths) -> Option<Value> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(p.data.join(INSTALLING_FILE)).ok()?).ok()?;
+    let pid = v.get("pid")?.as_u64()? as u32;
+    let alive = pid == std::process::id() || process::pid_alive(pid);
+    alive.then(|| serde_json::json!({ "phase": v["phase"], "downloaded": v["downloaded"], "total": v["total"], "updatedAt": v["updatedAt"] }))
+}
+
+fn install_locked(recipe: &Recipe, progress: Progress) -> Result<ToolStatus, String> {
     let _g = lock(&recipe.name);
     let platform = Platform::current();
     if !recipe.supported_on(&platform) {
@@ -875,11 +1005,16 @@ pub fn restart(recipe: &Recipe) -> Result<ToolStatus, String> {
 /// The engine-owned install decisions, split off a decisions map (the rest
 /// is a config patch). A key the recipe does not offer is an error the API
 /// turns into a 422, so a caller learns the recipe's vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InstallOptions {
     pub start_now: bool,
     pub autostart: bool,
+    /// `installDir`: where the release is unpacked instead of the default.
+    pub install_dir: Option<PathBuf>,
+    /// `ports.<name>` the app or user chose.
+    pub ports: std::collections::BTreeMap<String, u16>,
+    /// `secrets.<key>` the app or user gave.
+    pub secrets: std::collections::BTreeMap<String, String>,
 }
 
 pub fn install_options(recipe: &Recipe, values: &mut Map<String, Value>) -> Result<InstallOptions, String> {
@@ -894,10 +1029,95 @@ pub fn install_options(recipe: &Recipe, values: &mut Map<String, Value>) -> Resu
             (Some(v), Some(_)) => v.as_bool().ok_or_else(|| format!("`{key}` must be true or false")),
         }
     }
-    Ok(InstallOptions {
+    let mut o = InstallOptions {
         start_now: take(recipe, values, "startNow", recipe.start_after_install)?,
         autostart: take(recipe, values, "autostart", recipe.autostart)?,
-    })
+        ..Default::default()
+    };
+    // A blank answer in a form means "the default".
+    let blank = |v: &Value| v.is_null() || v.as_str().is_some_and(|t| t.trim().is_empty());
+    values.retain(|k, v| !((k == "installDir" || k.starts_with(recipe::PORT_DECISION) || k.starts_with(recipe::SECRET_DECISION)) && blank(v)));
+    if let Some(v) = values.remove("installDir") {
+        let dir = v.as_str().map(str::trim).filter(|d| !d.is_empty()).ok_or("`installDir` must be a folder path")?;
+        let dir = PathBuf::from(dir);
+        if !dir.is_absolute() {
+            return Err(format!("`installDir` must be an absolute path, not {}", dir.display()));
+        }
+        o.install_dir = Some(dir);
+    }
+    let keys: Vec<String> = values.keys().filter(|k| k.starts_with(recipe::PORT_DECISION) || k.starts_with(recipe::SECRET_DECISION)).cloned().collect();
+    for key in keys {
+        let v = values.remove(&key).unwrap_or(Value::Null);
+        if let Some(name) = key.strip_prefix(recipe::PORT_DECISION) {
+            if !recipe.ports.contains_key(name) {
+                return Err(format!("`{key}` names no port of {} (it has: {})", recipe.display_name, recipe.ports.keys().cloned().collect::<Vec<_>>().join(", ")));
+            }
+            let n = v.as_u64().or_else(|| v.as_str().and_then(|t| t.trim().parse().ok()));
+            let port = n.filter(|n| (1..=65535).contains(n)).ok_or_else(|| format!("`{key}` must be a port number (1–65535)"))?;
+            o.ports.insert(name.to_string(), port as u16);
+        } else if let Some(name) = key.strip_prefix(recipe::SECRET_DECISION) {
+            let def = recipe.secrets.iter().find(|s| s.key == name).ok_or_else(|| format!("`{key}` names no secret of {}", recipe.display_name))?;
+            let value = v.as_str().unwrap_or_default();
+            if value.chars().count() < def.min_len() || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err(format!("`{key}` must be at least {} characters, with no spaces", def.min_len()));
+            }
+            o.secrets.insert(name.to_string(), value.to_string());
+        }
+    }
+    Ok(o)
+}
+
+/// Refuse to install while a secret with no `generate` has no value.
+pub fn require_secrets(recipe: &Recipe) -> Result<(), String> {
+    let p = paths::tool_paths(&recipe.name)?;
+    let st = state::load(&p.data);
+    let missing: Vec<&str> = recipe.secrets.iter().filter(|s| s.required() && !st.secrets.contains_key(&s.key)).map(|s| s.label.as_deref().unwrap_or(&s.key)).collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{} needs {} to install; Roadie cannot generate it", recipe.display_name, missing.join(", ")))
+    }
+}
+
+/// Record the install decisions that are not config: the install folder,
+/// chosen ports and secrets. Before the first install only: an installed
+/// tool keeps its folder (reinstall to move it), and ports or keys already
+/// written into a file the tool owns cannot change under it.
+pub fn apply_install_choices(recipe: &Recipe, o: &InstallOptions) -> Result<(), String> {
+    if o.install_dir.is_none() && o.ports.is_empty() && o.secrets.is_empty() {
+        return Ok(());
+    }
+    let _g = lock(&recipe.name);
+    let p = paths::tool_paths(&recipe.name)?;
+    let installed = install::current_version(recipe, &p).is_some();
+    if let Some(dir) = &o.install_dir {
+        if installed && dir != &p.versions {
+            return Err(format!("{} is installed in {}; uninstall it to install it elsewhere", recipe.display_name, p.versions.display()));
+        }
+        let empty = std::fs::read_dir(dir).map(|mut d| d.next().is_none()).unwrap_or(true);
+        if !installed && !empty {
+            return Err(format!("{} is not empty; choose a new or empty folder for {} (Roadie removes it on uninstall)", dir.display(), recipe.display_name));
+        }
+        std::fs::create_dir_all(&p.root).map_err(|e| format!("create {}: {e}", p.root.display()))?;
+        paths::write_atomic(&p.root.join(paths::INSTALL_DIR_FILE), dir.to_string_lossy().as_bytes(), false)?;
+    }
+    std::fs::create_dir_all(&p.data).map_err(|e| format!("create {}: {e}", p.data.display()))?;
+    let mut st = state::load(&p.data);
+    let frozen = files_frozen(recipe, &build_ctx(recipe, &st, &p)?);
+    for (name, port) in &o.ports {
+        if frozen && st.ports.get(name) != Some(port) {
+            return Err(format!("{} already runs with port {name} {}, in the configuration it owns; change it there", recipe.display_name, st.ports.get(name).copied().unwrap_or_default()));
+        }
+        st.ports.insert(name.clone(), *port);
+        st.chosen_ports.insert(name.clone());
+    }
+    for (key, value) in &o.secrets {
+        if frozen && st.secrets.get(key) != Some(value) {
+            return Err(format!("{} already has its {key}, in the configuration it owns; change it there", recipe.display_name));
+        }
+        st.secrets.insert(key.clone(), value.clone());
+    }
+    state::save(&p.data, &st)
 }
 
 pub fn set_autostart(recipe: &Recipe, enabled: bool) -> Result<ToolStatus, String> {
@@ -931,6 +1151,9 @@ pub fn configure(recipe: &Recipe, patch: &Map<String, Value>) -> Result<ToolStat
     let p = paths::tool_paths(&recipe.name)?;
     std::fs::create_dir_all(&p.data).map_err(|e| format!("create {}: {e}", p.data.display()))?;
     let mut st = state::load_or_init(recipe, &p.data, &Platform::current())?;
+    if !patch.is_empty() && settings_frozen(recipe, &build_ctx(recipe, &st, &p)?) {
+        return Err(format!("{} manages its own settings since it was installed; change them in {} itself (its web UI)", recipe.display_name, recipe.display_name));
+    }
     state::apply_patch(recipe, &mut st, patch)?;
     let ctx = build_ctx(recipe, &st, &p)?;
     if recipe.kind == Kind::Daemon && install::current_version(recipe, &p).is_some() {
@@ -948,9 +1171,34 @@ pub fn configure(recipe: &Recipe, patch: &Map<String, Value>) -> Result<ToolStat
     Ok(status(recipe))
 }
 
+/// A trusted recipe is being replaced by `new`. A file Roadie managed that
+/// `new` hands to the tool (`writeOnce`) is removed, so the next write
+/// renders it once more from `new` and hands over a file in the new shape.
+/// Otherwise the tool would keep the old file forever.
+pub fn hand_over_files(old: &Recipe, new: &Recipe) -> Result<(), String> {
+    let _g = lock(&new.name);
+    let p = paths::tool_paths(&new.name)?;
+    let st = state::load(&p.data);
+    let ctx = build_ctx(new, &st, &p)?;
+    for f in new.files.iter().filter(|f| f.write_once) {
+        if old.files.iter().any(|o| o.path == f.path && !o.write_once) {
+            let path = template::expand_string(&f.path, &ctx)?;
+            if std::path::Path::new(&path).exists() {
+                std::fs::remove_file(&path).map_err(|e| format!("replace {path}: {e}"))?;
+                log::info!("{}: {path} is now {}'s own; written once more from the new recipe", new.name, new.display_name);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A consumer's grant changed: re-render the config (the key list lives in
-/// it) and restart when idle.
+/// it) and restart when idle. Only per-consumer keys live in the config; a
+/// shared key or an open connection has nothing to re-render.
 pub fn refresh_consumers(recipe: &Recipe) -> Result<ToolStatus, String> {
+    if recipe.connection.as_ref().map(|c| c.policy) != Some(recipe::ConnectionPolicy::PerConsumerKey) {
+        return Ok(status(recipe));
+    }
     configure(recipe, &Map::new())
 }
 
@@ -1025,6 +1273,8 @@ pub struct DryRun {
     pub bin_path: Option<String>,
     /// Daemon ports as they would be chosen now (all bound to 127.0.0.1).
     pub ports: std::collections::BTreeMap<String, u16>,
+    /// Another copy already running here, which Roadie's would clash with.
+    pub other_instance: Option<OtherInstance>,
 }
 
 pub fn dry_run(recipe: &Recipe) -> Result<DryRun, String> {
@@ -1082,6 +1332,7 @@ pub fn dry_run(recipe: &Recipe) -> Result<DryRun, String> {
         logs_dir: p.logs.to_string_lossy().into_owned(),
         bin_path: (recipe.kind == Kind::Cli).then(|| shim_path(recipe).ok().map(|s| s.to_string_lossy().into_owned())).flatten(),
         ports: if recipe.kind == Kind::Daemon { st.ports.clone() } else { Default::default() },
+        other_instance: other_instance(recipe, &Default::default()),
     })
 }
 
@@ -1216,7 +1467,7 @@ mod tests {
 
     #[test]
     fn slskd_files_render_like_the_reference_yml() {
-        let recipe = recipe::load_builtin().remove(0);
+        let recipe = recipe::fixtures::recipe("slskd");
         let mut ctx = Ctx::empty(Platform::current());
         ctx.home = "/Users/x".into();
         ctx.data = "/data".into();
@@ -1264,11 +1515,209 @@ mod tests {
     }
     #[test]
     fn status_names_the_config_files_by_path_only() {
-        let recipe = recipe::load_builtin().remove(0);
+        let recipe = recipe::fixtures::recipe("slskd");
         let mut ctx = Ctx::empty(Platform::current());
         ctx.data = "/data".into();
         assert_eq!(config_file_paths(&recipe, &ctx), vec![ConfigFile { path: "/data/slskd.yml".into(), secret: true }]);
         let json = serde_json::to_value(ConfigFile { path: "/data/slskd.yml".into(), secret: true }).unwrap();
         assert_eq!(json, serde_json::json!({ "path": "/data/slskd.yml", "secret": true }), "no contents, camelCase on the wire");
+    }
+
+    fn r6(name: &str) -> Recipe {
+        let mut r = recipe::fixtures::recipe("slskd@6");
+        r.name = name.into();
+        r
+    }
+
+    #[test]
+    fn install_decisions_take_ports_secrets_and_a_folder_and_refuse_the_rest() {
+        let r = r6("opts-test");
+        let mut v = Map::new();
+        v.insert("ports.web".into(), serde_json::json!(6000));
+        v.insert("secrets.internalKey".into(), serde_json::json!("k".repeat(20)));
+        v.insert("installDir".into(), serde_json::json!(if cfg!(windows) { "C:\\Tools\\slskd" } else { "/opt/slskd" }));
+        v.insert("soulseekUsername".into(), serde_json::json!("bj"));
+        let o = install_options(&r, &mut v).unwrap();
+        assert_eq!((o.ports["web"], o.secrets["internalKey"].len(), o.install_dir.is_some()), (6000, 20, true));
+        assert_eq!(v.keys().collect::<Vec<_>>(), vec!["soulseekUsername"], "the rest is config");
+
+        for (k, val, why) in [
+            ("secrets.internalKey", serde_json::json!("short"), "at least 16"),
+            ("ports.web", serde_json::json!(0), "port number"),
+            ("ports.nope", serde_json::json!(1), "names no port"),
+            ("installDir", serde_json::json!("relative/dir"), "absolute"),
+        ] {
+            let mut v = Map::new();
+            v.insert(k.into(), val);
+            let e = install_options(&r, &mut v).unwrap_err();
+            assert!(e.contains(why), "{k}: {e}");
+        }
+        let mut per = recipe::fixtures::recipe("slskd");
+        per.name = "opts-test".into();
+        let mut v = Map::new();
+        v.insert("ports.web".into(), serde_json::json!("6000"));
+        assert_eq!(install_options(&per, &mut v).unwrap().ports["web"], 6000, "any port may be chosen, askOnInstall or not; a form's text counts");
+    }
+
+    #[test]
+    fn chosen_values_stick_and_a_write_once_file_is_the_tools() {
+        crate::recipe::store::test_root();
+        let r = r6("write-once-test");
+        let _ = uninstall(&r, false);
+        let dir = std::env::temp_dir().join(format!("roadie-installdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let o = InstallOptions {
+            install_dir: Some(dir.clone()),
+            ports: [("web".to_string(), 6031u16)].into(),
+            secrets: [("internalKey".to_string(), "chosen-by-the-app-123".to_string())].into(),
+            ..Default::default()
+        };
+        apply_install_choices(&r, &o).unwrap();
+        let p = paths::tool_paths(&r.name).unwrap();
+        assert_eq!(p.versions, dir, "the chosen folder is where releases go");
+        let st = state::load_or_init(&r, &p.data, &Platform::current()).unwrap();
+        assert_eq!((st.ports["web"], st.secrets["internalKey"].as_str()), (6031, "chosen-by-the-app-123"), "a chosen key is not regenerated");
+        assert!(st.chosen_ports.contains("web"));
+
+        // Installed (faked): the first write lands, then the file is slskd's.
+        let bin = install::binary_path(&r, &p, "1.0.0");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"x").unwrap();
+        install::set_current(&p, "1.0.0").unwrap();
+        configure(&r, &Map::new()).unwrap();
+        let file = p.data.join("slskd.yml");
+        let first = std::fs::read_to_string(&file).unwrap();
+        assert!(first.contains("port: 6031") && first.contains("chosen-by-the-app-123") && first.contains("remote_configuration: true"), "{first}");
+        std::fs::write(&file, "edited in slskd's web UI\n").unwrap();
+        configure(&r, &Map::new()).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited in slskd's web UI\n", "never rewritten");
+        let mut patch = Map::new();
+        patch.insert("soulseekUsername".into(), serde_json::json!("bj"));
+        assert!(configure(&r, &patch).unwrap_err().contains("manages its own settings"));
+        assert!(!status(&r).configurable);
+        let o2 = InstallOptions { ports: [("web".to_string(), 7000u16)].into(), ..Default::default() };
+        assert!(apply_install_choices(&r, &o2).unwrap_err().contains("configuration it owns"), "a port baked into slskd's file cannot change under it");
+        let elsewhere = InstallOptions { install_dir: Some(dir.join("other")), ..Default::default() };
+        assert!(apply_install_choices(&r, &elsewhere).unwrap_err().contains("uninstall it"));
+
+        uninstall(&r, false).unwrap();
+        assert!(!dir.exists(), "uninstall removes the chosen folder");
+        assert_eq!(paths::tool_paths(&r.name).unwrap().versions, p.root.join("versions"), "and forgets it");
+    }
+
+    #[test]
+    fn an_install_folder_must_be_new_or_empty() {
+        crate::recipe::store::test_root();
+        let r = r6("installdir-busy-test");
+        let dir = std::env::temp_dir().join(format!("roadie-installdir-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("someone-elses.txt"), b"x").unwrap();
+        let e = apply_install_choices(&r, &InstallOptions { install_dir: Some(dir.clone()), ..Default::default() }).unwrap_err();
+        assert!(e.contains("not empty"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_recipe_update_to_write_once_hands_over_a_fresh_file() {
+        crate::recipe::store::test_root();
+        let mut old = recipe::fixtures::recipe("slskd");
+        old.name = "hand-over-test".into();
+        let new = r6("hand-over-test");
+        let _ = uninstall(&old, false);
+        let p = paths::tool_paths(&old.name).unwrap();
+        let bin = install::binary_path(&old, &p, "1.0.0");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"x").unwrap();
+        install::set_current(&p, "1.0.0").unwrap();
+        configure(&old, &Map::new()).unwrap();
+        let file = p.data.join("slskd.yml");
+        assert!(std::fs::read_to_string(&file).unwrap().contains("remote_configuration: false"));
+
+        hand_over_files(&old, &new).unwrap();
+        configure(&new, &Map::new()).unwrap();
+        let handed = std::fs::read_to_string(&file).unwrap();
+        assert!(handed.contains("remote_configuration: true"), "written once more, in the new shape: {handed}");
+        hand_over_files(&new, &new).unwrap();
+        assert!(file.exists(), "a file already the tool's is left alone");
+        uninstall(&new, false).unwrap();
+    }
+
+    #[test]
+    fn status_reports_an_install_in_progress_from_any_process() {
+        crate::recipe::store::test_root();
+        let r = r6("installing-test");
+        let p = paths::tool_paths(&r.name).unwrap();
+        std::fs::create_dir_all(&p.data).unwrap();
+        let marker = p.data.join(INSTALLING_FILE);
+        let mark = |pid: u32| std::fs::write(&marker, serde_json::json!({ "phase": "downloading", "downloaded": 10, "total": 100, "pid": pid, "updatedAt": 1 }).to_string()).unwrap();
+        assert!(status(&r).installing.is_none());
+        mark(std::process::id());
+        let st = status(&r);
+        assert_eq!((st.installing.as_ref().unwrap()["phase"].as_str(), st.installing.as_ref().unwrap()["total"].as_u64()), (Some("downloading"), Some(100)));
+        mark(u32::MAX - 7);
+        assert!(status(&r).installing.is_none(), "a crashed install is not one");
+        let _ = std::fs::remove_dir_all(&p.root);
+    }
+
+    #[test]
+    fn slskd_6_renders_https_off_and_incomplete_inside_downloads_unless_chosen() {
+        let r = recipe::fixtures::recipe("slskd@6");
+        let mut ctx = Ctx::empty(Platform { os: "darwin", arch: "arm64" });
+        ctx.data = "/d".into();
+        ctx.ports = [("web".to_string(), 5030u16), ("https".to_string(), 5031u16), ("listen".to_string(), 50300u16)].into();
+        ctx.config.insert("downloadsDir".into(), Value::String("/m/Soulseek".into()));
+        ctx.config.insert("httpsEnabled".into(), Value::Bool(false));
+        let y = render_files(&r, &ctx).unwrap().remove(0).contents;
+        assert!(y.contains("  incomplete: \"/m/Soulseek/.incomplete\"\n"), "{y}");
+        assert!(y.contains("  https:\n    disabled: true\n    port: 5031\n"), "{y}");
+
+        ctx.config.insert("incompleteDir".into(), Value::String("/fast/partial".into()));
+        ctx.config.insert("httpsEnabled".into(), Value::Bool(true));
+        let y = render_files(&r, &ctx).unwrap().remove(0).contents;
+        assert!(y.contains("  incomplete: \"/fast/partial\"\n"), "{y}");
+        assert!(y.contains("  https:\n    disabled: false\n    port: 5031\n"), "{y}");
+    }
+
+    /// Something on a free local port that answers every request 401, like
+    /// a slskd that is not Roadie's.
+    fn foreign_on_free_port() -> u16 {
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut c in l.incoming().flatten() {
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 2048];
+                let _ = c.read(&mut buf);
+                let _ = c.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn another_copy_is_found_before_install_on_its_port_and_for_a_singleton_anywhere() {
+        crate::recipe::store::test_root();
+        let port = foreign_on_free_port();
+        let free = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        let mut r = r6("other-instance-test");
+        r.ports.get_mut("web").unwrap().default = port;
+
+        let o = other_instance(&r, &Default::default()).expect("a copy that rejects Roadie's key on the port it would use");
+        assert!(o.blocks_start && o.url.ends_with(&format!(":{port}")) && o.message.contains("will not start"), "{o:?}");
+
+        // Choosing another port does not dodge a singleton: it still blocks.
+        let elsewhere: std::collections::BTreeMap<String, u16> = [("web".to_string(), free)].into();
+        assert!(other_instance(&r, &elsewhere).is_some_and(|o| o.blocks_start));
+        // Without singleton, another port is a way out: nothing to warn about.
+        r.singleton = false;
+        assert!(other_instance(&r, &elsewhere).is_none());
+        let o = other_instance(&r, &Default::default()).unwrap();
+        assert!(!o.blocks_start && o.message.contains("choose another port"), "{o:?}");
+
+        // Nothing there: nothing to say.
+        r.ports.get_mut("web").unwrap().default = free;
+        r.singleton = true;
+        assert!(other_instance(&r, &Default::default()).is_none());
+        assert!(dry_run(&r).unwrap().other_instance.is_none());
     }
 }

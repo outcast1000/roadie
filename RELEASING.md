@@ -91,6 +91,17 @@ The bundled binary reports its own version:
 roadie version      # {"version": "0.2.0", "release": "cli"}
 ```
 
+## Recipes are not released here
+
+Recipes live in [`outcast1000/roadie-recipes`](https://github.com/outcast1000/roadie-recipes) and
+reach users without a Roadie release. When a recipe needs a recipe field a Roadie release added,
+the recipe sets `minRoadie` to that release, and older Roadies don't see it.
+
+**Migration to remove later.** 0.5.2 was the last release with built-in recipes.
+`src-tauri/src/recipe/legacy.rs` (and `recipe/legacy/`) keeps frozen copies of them only to
+migrate tools installed by 0.5.2 or earlier. Delete them in **0.8.0**, when enough users have
+started a catalog-reading Roadie once.
+
 ## Known gaps
 
 - **Code signing.** macOS builds are not signed with a Developer ID or notarized, and Windows

@@ -36,6 +36,7 @@ export function InstallPlan({ recipe: r, dryRun }: Props) {
       <h4>What will change on this computer</h4>
       {error ? <p className="warn-text">Could not work out the plan: {error}</p> : null}
       {!dry && !error ? <p className="muted">Checking the latest release…</p> : null}
+      {dry?.otherInstance ? <div className="callout warn">{dry.otherInstance.message}</div> : null}
       {dry ? (
         <dl className="facts">
           <dt>Downloads</dt>

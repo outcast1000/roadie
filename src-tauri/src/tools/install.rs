@@ -667,7 +667,7 @@ mod tests {
     #[test]
     fn current_pointer_and_staging_order() {
         let p = tmp("current");
-        let recipe = crate::recipe::load_builtin().remove(0);
+        let recipe = crate::recipe::fixtures::recipe("slskd");
         for v in ["0.25.1", "0.26.0", "0.24.0"] {
             let vd = version_dir(&p, v);
             std::fs::create_dir_all(&vd).unwrap();

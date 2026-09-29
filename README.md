@@ -26,8 +26,10 @@ plain app: the service exits shortly after you close the window and nothing star
 Either way the window is the only thing that can approve an install: it proves itself to the
 service over a local channel other programs cannot use.
 
-First recipe: [slskd](https://github.com/slskd/slskd) (Soulseek). Planned: yt-dlp, ffmpeg,
-rqbit, cloudflared.
+Recipes come from the [Roadie recipe catalog](https://github.com/outcast1000/roadie-recipes):
+[slskd](https://github.com/slskd/slskd) (Soulseek), yt-dlp and ffmpeg so far; rqbit and
+cloudflared are planned. Anyone can add or fix one there with a pull request, without a Roadie
+release.
 
 ## For other apps
 
@@ -62,9 +64,21 @@ rqbit, cloudflared.
 
 ## Recipes
 
-The format is documented in [`recipes/SCHEMA.md`](recipes/SCHEMA.md). A recipe submitted through
-the API is a **draft**: Roadie shows where it downloads from, what it runs and which files it
-writes; it becomes installable only when you click **Trust**.
+The format is documented in [`recipes/SCHEMA.md`](recipes/SCHEMA.md). Roadie ships no recipes: it
+reads them from the catalog, [`outcast1000/roadie-recipes`](https://github.com/outcast1000/roadie-recipes),
+refreshing every few hours (`roadie catalog refresh` or **Refresh catalog** to do it now).
+
+The catalog is not signed, so Roadie never trusts a recipe just because it is there. The first
+time you install a tool, Roadie shows you its recipe: where it downloads from, what it runs and
+which files it writes. You approve it with the install. When the catalog publishes a new revision
+of a recipe you trusted, Roadie offers it as a **recipe update** for the same review, and never
+applies it silently. A tool whose recipe leaves the catalog keeps working with the copy you
+approved.
+
+A recipe submitted through the API is a **draft**. It becomes installable only when you click
+**Trust**. To share one you wrote, use **Submit to catalog…** in its review. It opens GitHub with
+the file filled in, and you open the pull request from your own account. Roadie holds no GitHub
+credential. Assistants can do the same with the MCP tool `submit_recipe`.
 
 ## Development
 

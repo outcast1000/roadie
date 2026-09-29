@@ -15,20 +15,26 @@ paths:
   across restarts so a configured client keeps working.
 - `host_and_method_guard`: `OPTIONS` → 405, `Host` must be loopback. No `Access-Control-*`
   header, ever — a web page must not be able to use a visitor's browser as a proxy into it.
-- **Tier 1 (no token)**: `/v1/health`, `/v1/tools`, `/v1/tools/{name}`,
+- **Tier 1 (no token)**: `/v1/health` (with `catalog`), `/v1/tools`, `/v1/tools/{name}`,
+  `/v1/catalog` (the catalog cache's state), `GET /v1/tools/{name}/options` (every value an
+  install takes, `intake::options`; never a secret's value),
   `/v1/tools/{name}/connection?consumer=<id>` (403 `consent-required` until approved; a known
   consumer's 403 queues a Connect request, an unknown id does **not** auto-register — a name is
   not a credential).
 - **Tier 2 (bearer, SHA-256-compared)**: start/stop/restart/update/check-updates/autostart/
   config/logs, the request queue (`GET /v1/requests/{id}/prompt` is the prompt as text plus
   `surface`; `POST` on it shows a pending request on screen again), recipes (`schema`, `validate`, `PUT` draft, `dryrun`,
-  `DELETE`, `?full=true` for stored shapes), consumers, `GET /v1/events?since&wait`
+  `DELETE`, `?full=true` for stored shapes, `GET /v1/recipes/{name}/submission` — the file and
+  GitHub link for proposing a trusted recipe to the catalog; it submits nothing),
+  `POST /v1/tools/{name}/options` with `{recipe}` (the options of the app's own file),
+  `POST /v1/catalog/refresh` (fetch now; 502 with the kept cache's state on failure), consumers, `GET /v1/events?since&wait`
   (long-poll of `events.rs`'s numbered log), `POST /v1/shutdown` (the window's handoff when it
   replaces a stale build). `DELETE /v1/tools/{name}` sits on the public router path but checks
   the token itself.
 - **Tier 3 (owner, `X-Roadie-Owner`)**: `/v1/owner/requests/{id}/decide`,
   `/v1/owner/recipes/{name}/trust`, `/v1/owner/tools/{name}/install` (the card's click),
-  `DELETE /v1/owner/tools/{name}`, `/v1/owner/intent` (deep links), `/v1/owner/settings`.
+  `DELETE /v1/owner/tools/{name}`, `/v1/owner/tools/{name}/secrets` (the `askOnInstall` secrets,
+  for the card's "Show key"), `/v1/owner/intent` (deep links), `/v1/owner/settings`.
   Tokens exist only in `owner.rs`'s registry, minted for a peer that connected to the owner
   socket **and** runs the Roadie binary (kernel-reported pid → `process::pid_exe`). The peer's
   first line says `window` or `terminal`; a terminal (the CLI answering on its TTY) is admitted
@@ -54,6 +60,14 @@ be valid, 422 with pointers, and named like the URL, 400). Identical to the trus
 ordinary install/update. Otherwise install queues an Install request carrying it, and update on
 an installed tool queues `replaceRecipe` (409 when not installed); both answer `recipeChange`.
 Approving trusts it (`actions::adopt`: save, re-render an installed tool) before acting.
+
+Without `recipe`, the recipe catalog stands in for the app. An install of a tool that only the
+catalog offers queues an Install request carrying the catalog's recipe (`recipeChange: new`,
+`recipeSource: catalog`). An install or update of a trusted catalog recipe whose catalog revision
+is higher carries the new revision (`changesTrusted`, `recipeSource: catalog`): a recipe update,
+never applied without the click. An app's own recipe wins over the catalog's. One identical to
+the catalog's counts as the catalog's, so later updates keep coming. Status reports `available`
+(the catalog offers it), `recipeUpdate {revision, changedKeys}` and `delisted`.
 
 An install request that leaves a `required` field without a value (request, recipe default or
 stored config) is refused with 422 and `missing: [keys]` when the surface is not `window`:
@@ -90,4 +104,4 @@ service's `/v1/owner/intent`; `actions::intent` parses, queues and emits `intent
 
 `api/mod.rs` tests build the router with a fixed token and a temp data root and assert: public
 reads, Host/OPTIONS, 401s, consent 403 vs 200, 202 + pending for install, no secret echo, draft
-not installable (409), built-in name collision (409). Extend them with any new route.
+not installable (409), trusted name collision (409). Extend them with any new route.

@@ -181,7 +181,9 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/tools", get(list_tools))
         .route("/v1/tools/{name}", get(get_tool).delete(uninstall_tool))
-        .route("/v1/tools/{name}/connection", get(get_connection));
+        .route("/v1/tools/{name}/connection", get(get_connection))
+        .route("/v1/catalog", get(catalog_status))
+        .route("/v1/tools/{name}/options", get(tool_options));
 
     let bearer = Router::new()
         .route("/v1/tools/{name}/start", post(start_tool))
@@ -195,6 +197,8 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/v1/tools/{name}/logs", get(tool_logs))
         .route("/v1/events", get(list_events))
         .route("/v1/shutdown", post(shutdown))
+        .route("/v1/catalog/refresh", post(catalog_refresh))
+        .route("/v1/tools/{name}/options", post(tool_options_for))
         .route("/v1/requests", get(list_requests))
         .route("/v1/requests/{id}", get(get_request))
         .route("/v1/requests/{id}/prompt", get(get_request_prompt).post(reshow_request))
@@ -203,6 +207,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/v1/recipes/validate", post(validate_recipe))
         .route("/v1/recipes/{name}", get(get_recipe).put(put_recipe).delete(delete_recipe))
         .route("/v1/recipes/{name}/dryrun", post(dryrun_recipe))
+        .route("/v1/recipes/{name}/submission", get(recipe_submission))
         .route("/v1/consumers", get(list_consumers).post(register_consumer))
         .route("/v1/consumers/{id}", delete(revoke_consumer))
         .layer(middleware::from_fn_with_state(state.clone(), require_bearer));
@@ -216,6 +221,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/v1/owner/tools/{name}/install", post(owner_install))
         .route("/v1/owner/tools/{name}", delete(owner_uninstall))
         .route("/v1/owner/tools/{name}/web-login", get(owner_web_login))
+        .route("/v1/owner/tools/{name}/secrets", get(owner_secrets))
         .route("/v1/owner/intent", post(owner_intent))
         .route("/v1/owner/settings", get(owner_get_settings).put(owner_put_settings))
         .layer(middleware::from_fn(require_owner));
@@ -310,8 +316,42 @@ async fn health(State(state): State<ApiState>) -> Response {
         "buildId": state.build_id, "pid": std::process::id(), "role": "service",
         "windowConnected": owner::owners_connected() > 0,
         "approvalSurface": crate::prompt::surface().name(),
+        "catalog": recipe::catalog::status(),
     }))
     .into_response()
+}
+
+/// The recipe catalog's cache: where it comes from, when it was fetched,
+/// whether it is stale and why.
+async fn catalog_status() -> Response {
+    match blocking(|| Ok(recipe::catalog::status())).await {
+        Ok(st) => Json(st).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Every value an install of this tool can be given (`intake::options`):
+/// what a client shows its user before it asks to install. No secrets.
+async fn tool_options(AxumPath(name): AxumPath<String>) -> Response {
+    let Some(stored) = store::get(&name) else { return err(StatusCode::NOT_FOUND, format!("unknown tool: {name}")) };
+    match blocking(move || Ok(intake::options(&stored.recipe))).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// The same for a recipe the client has (`{"recipe": …}`), e.g. the file
+/// it downloaded from the catalog.
+async fn tool_options_for(AxumPath(name): AxumPath<String>, body: Bytes) -> Response {
+    let v = match recipe_body(&body) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match blocking(move || Ok(intake::brought_recipe(&name, v).map(|(recipe, _, _)| intake::options(&recipe)))).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(r)) => refusal(r),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
 }
 
 async fn list_tools() -> Response {
@@ -441,6 +481,24 @@ async fn check_updates_tool(AxumPath(name): AxumPath<String>) -> Response {
     tool_action(name, tools::check_updates).await
 }
 
+/// Fetch the recipe catalog now. A failure keeps the cache; the answer is
+/// the catalog's state either way (`error` says what went wrong).
+async fn catalog_refresh() -> Response {
+    let st = blocking(|| {
+        if let Err(e) = store::refresh_catalog() {
+            log::warn!("catalog refresh: {e}");
+        }
+        events::emit("recipe-changed", json!({ "origin": "catalog" }));
+        Ok(recipe::catalog::status())
+    })
+    .await;
+    match st {
+        Ok(st) if st.error.is_some() => (StatusCode::BAD_GATEWAY, Json(st)).into_response(),
+        Ok(st) => Json(st).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
 /// Long-poll the event log: `?since=<seq>&wait=<sec>` (wait ≤ 30, default
 /// 25). Answers `{ events: [...], latest: <seq> }` as soon as anything newer
 /// than `since` exists, or empty when the wait passes.
@@ -508,6 +566,15 @@ async fn owner_uninstall(AxumPath(name): AxumPath<String>, Query(q): Query<HashM
 /// it is a secret, and the bearer token does not open owner routes.
 async fn owner_web_login(AxumPath(name): AxumPath<String>) -> Response {
     match tokio::task::spawn_blocking(move || intake::owner_web_login(&name)).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(r)) => refusal(r),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("task failed: {e}")),
+    }
+}
+
+/// The owner's "Show key": the secrets the recipe lets the user choose.
+async fn owner_secrets(AxumPath(name): AxumPath<String>) -> Response {
+    match tokio::task::spawn_blocking(move || intake::owner_secrets(&name)).await {
         Ok(Ok(v)) => Json(v).into_response(),
         Ok(Err(r)) => refusal(r),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("task failed: {e}")),
@@ -601,13 +668,13 @@ async fn install_tool(AxumPath(name): AxumPath<String>, req: Request) -> Respons
         Ok(Err(r)) => return refusal(r),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
-    let (decisions, proposed) = (plan.decisions, plan.recipe_change);
+    let (decisions, proposed, other) = (plan.decisions, plan.recipe_change, plan.other_instance);
     let r = requests::create(plan.kind, &by);
     crate::scheme::focus_if_possible();
     (
         StatusCode::ACCEPTED,
         Json(json!({
-            "requestId": r.id, "status": r.status, "decisions": decisions, "recipeChange": proposed,
+            "requestId": r.id, "status": r.status, "decisions": decisions, "recipeChange": proposed, "otherInstance": other,
             "hint": "the user must approve this in Roadie: its window lets them change or fill in any decision, a native dialog (Roadie without a window) shows them as sent; poll GET /v1/requests/{id}. With `consumer`, approval also grants that app its connection key."
         })),
     )
@@ -691,15 +758,34 @@ async fn list_recipes(Query(q): Query<HashMap<String, String>>) -> Response {
     Json(list).into_response()
 }
 
+/// What it takes to propose a trusted recipe to the catalog: the file and a
+/// GitHub link. Submits nothing; opening the link is the window's (or the
+/// user's) job, never a side effect here.
+async fn recipe_submission(AxumPath(name): AxumPath<String>) -> Response {
+    match blocking(move || Ok(intake::submission(&name))).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(r)) => refusal(r),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
 async fn recipe_schema() -> Response {
     Json(json!({
         "recipeVersion": recipe::RECIPE_VERSION,
         "platform": recipe::Platform::current().key(),
         "platforms": recipe::PLATFORMS,
         "schema": SCHEMA_MD,
-        "example": serde_json::from_str::<Value>(recipe::BUILTIN[0].1).unwrap_or_default(),
+        "example": schema_example(),
     }))
     .into_response()
+}
+
+/// A complete recipe to learn from: the catalog's slskd (the daemon
+/// reference) when cached, else any catalog recipe, else none — then
+/// `GET /v1/recipes/{name}` on a listed one serves the same purpose.
+fn schema_example() -> Value {
+    let listed = store::catalog_entry("slskd").or_else(|| store::list().into_iter().find(|s| s.origin == store::Origin::Catalog).and_then(|s| store::catalog_entry(&s.recipe.name)));
+    listed.and_then(|l| serde_json::to_value(l.recipe).ok()).unwrap_or(Value::Null)
 }
 
 fn recipe_body(body: &Bytes) -> Result<Value, Response> {
@@ -858,6 +944,14 @@ mod tests {
         let _ = std::fs::create_dir_all(&root);
         paths::init(root);
         store::load_all();
+        // The recipes a user who installed them before the catalog has:
+        // trusted, from the catalog. Once: tests run in parallel.
+        static SEED: std::sync::Once = std::sync::Once::new();
+        SEED.call_once(|| {
+            for r in recipe::fixtures::all() {
+                store::put_trusted(r, store::RecipeSource::Catalog).unwrap();
+            }
+        });
         build_router(ApiState { token: Arc::new(TOKEN.into()), version: "0.0.0-test".into(), build_id: "test-build".into() })
     }
 
@@ -908,6 +1002,17 @@ mod tests {
 
         let resp = app.clone().oneshot(req("GET", "/v1/tools/nope", None, None)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let resp = app.clone().oneshot(req("GET", "/v1/catalog", None, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = json_of(resp).await;
+        assert!(v["url"].as_str().is_some_and(|u| u.starts_with("https://raw.githubusercontent.com/outcast1000/roadie-recipes/")), "{v}");
+        let resp = app.clone().oneshot(req("POST", "/v1/catalog/refresh", None, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "fetching the catalog needs the token");
+        let resp = app.clone().oneshot(req("GET", "/v1/recipes/slskd/submission", None, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "a submission payload needs the token");
+        let resp = app.clone().oneshot(req("GET", "/v1/recipes/nope/submission", Some(TOKEN), None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     async fn resp_headers_have_no_cors(app: &Router) -> bool {
@@ -933,6 +1038,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         let resp = app.clone().oneshot(req("DELETE", "/v1/tools/slskd", None, None)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "DELETE on the public path still needs the token");
+        // The example is the catalog's slskd.
+        let _catalog = recipe::catalog::tests::serial();
+        let slskd = recipe::fixtures::json("slskd").as_bytes().to_vec();
+        let entry = json!({ "name": "slskd", "path": "recipes/slskd.json", "sha256": crate::tools::install::sha256_hex(&slskd) });
+        let index = serde_json::to_vec(&json!({ "indexVersion": 1, "recipes": [entry] })).unwrap();
+        recipe::catalog::refresh_with(&|url: &str| if url.ends_with("index.json") { Ok(index.clone()) } else { Ok(slskd.clone()) }).unwrap();
+        store::load_all();
         let resp = app.clone().oneshot(req("GET", "/v1/recipes/schema", Some(TOKEN), None)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let v = json_of(resp).await;
@@ -983,7 +1095,7 @@ mod tests {
 
         let resp = app.clone().oneshot(req("GET", "/v1/recipes?full=true", Some(TOKEN), None)).await.unwrap();
         let v = json_of(resp).await;
-        assert!(v[0]["recipe"]["recipeVersion"] == 1 && v[0]["origin"] == "builtin", "full listing returns stored recipes: {v}");
+        assert!(v.as_array().unwrap().iter().any(|s| s["recipe"]["recipeVersion"] == 1 && s["origin"] == "user"), "full listing returns stored recipes: {v}");
     }
 
     #[tokio::test]
@@ -1001,7 +1113,7 @@ mod tests {
 
         // A copy of yt-dlp that targets only another platform, so approving
         // it fails at install without touching the network.
-        let mut theirs: Value = serde_json::from_str(recipe::BUILTIN.iter().find(|(n, _)| *n == "yt-dlp").unwrap().1).unwrap();
+        let mut theirs: Value = serde_json::from_str(recipe::fixtures::json("yt-dlp")).unwrap();
         let other = if recipe::Platform::current().key().starts_with("darwin") { "windows-x64" } else { "darwin-arm64" };
         let asset = theirs["source"]["assets"][other].clone();
         theirs["name"] = json!("brought-demo");
@@ -1011,8 +1123,8 @@ mod tests {
         let resp = app.clone().oneshot(post("/v1/tools/elsewhere/install", json!({ "recipe": theirs }))).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "the URL and /recipe/name must agree");
 
-        // The built-in itself: no review needed.
-        let stock: Value = serde_json::from_str(recipe::BUILTIN.iter().find(|(n, _)| *n == "yt-dlp").unwrap().1).unwrap();
+        // The trusted recipe itself: no review needed.
+        let stock: Value = serde_json::from_str(recipe::fixtures::json("yt-dlp")).unwrap();
         let resp = app.clone().oneshot(post("/v1/tools/yt-dlp/install", json!({ "recipe": stock }))).await.unwrap();
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let v = json_of(resp).await;
@@ -1174,7 +1286,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recipes_validate_draft_and_refuse_builtin_names() {
+    async fn recipes_validate_draft_and_refuse_trusted_names() {
         let app = setup();
         let bad = r#"{"recipeVersion":1,"name":"demo","displayName":"Demo","author":"Test","revision":1,"platforms":["darwin-arm64"],"kind":"cli","source":{"kind":"githubRelease","repo":"x/y","assets":{"darwin-arm64":"d"}},"archive":"bare","version":{"args":["--version"],"regex":"nocapture"}}"#;
         let resp = app.clone().oneshot(req("POST", "/v1/recipes/validate", Some(TOKEN), Some(bad))).await.unwrap();

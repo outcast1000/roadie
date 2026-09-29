@@ -8,8 +8,12 @@
 //! AI assistant iterating through the API: "/files/0/content/web/port:
 //! unknown placeholder `ports.wev`" is actionable, "invalid recipe" is not.
 
+pub mod catalog;
 pub mod emit;
+#[cfg(test)]
+pub mod fixtures;
 pub mod httpsteps;
+pub mod legacy;
 pub mod jsonq;
 pub mod store;
 pub mod template;
@@ -84,6 +88,17 @@ pub struct Recipe {
     /// format version (`recipeVersion`).
     #[serde(default)]
     pub revision: u32,
+    /// The oldest Roadie that runs this recipe correctly (`x.y.z`). An older
+    /// Roadie ignores fields it does not know, so a recipe using a newer
+    /// field names the Roadie that added it; the catalog hides it from older
+    /// ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_roadie: Option<String>,
+    /// Daemon only: the tool runs one copy per computer (a second refuses to
+    /// start, whatever its port). Before an install Roadie then looks for
+    /// another copy on the default ports too, not just the chosen ones.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub singleton: bool,
     /// Platform keys this recipe targets. Every listed platform must have a
     /// download in `source` (or an override), and every download must be
     /// listed, so the two never disagree.
@@ -165,7 +180,10 @@ pub struct InstallChoice {
 }
 
 /// Decision keys the engine owns; no config field may use them.
-pub const RESERVED_DECISION_KEYS: &[&str] = &["startNow", "autostart"];
+pub const RESERVED_DECISION_KEYS: &[&str] = &["startNow", "autostart", "installDir"];
+/// Decision keys for a recipe's install-time secrets and ports.
+pub const SECRET_DECISION: &str = "secrets.";
+pub const PORT_DECISION: &str = "ports.";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -269,8 +287,35 @@ pub struct VersionProbe {
 #[serde(rename_all = "camelCase")]
 pub struct SecretDef {
     pub key: String,
-    /// `hex<N>` — N hex characters from OS entropy.
-    pub generate: String,
+    /// `hex<N>` — N hex characters from OS entropy. Absent: the secret is
+    /// required, and the installing app or the user must give it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generate: Option<String>,
+    /// Asked in the install prompt, and the user's to see afterwards (the
+    /// owner's screen can reveal it). Any secret may be given at install
+    /// (decision `secrets.<key>`); Roadie generates the rest.
+    #[serde(default)]
+    pub ask_on_install: bool,
+    /// Shown in the install prompt; required with `askOnInstall`.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// The shortest value accepted from an app or the user (default 16).
+    #[serde(default)]
+    pub min_len: Option<usize>,
+}
+
+impl SecretDef {
+    /// How long a generated value is; `None` when Roadie generates none.
+    pub fn generated_len(&self) -> Option<usize> {
+        self.generate.as_deref().map(|g| g.trim_start_matches("hex").parse().unwrap_or(48))
+    }
+    /// No `generate`: an install must supply it.
+    pub fn required(&self) -> bool {
+        self.generate.is_none()
+    }
+    pub fn min_len(&self) -> usize {
+        self.min_len.unwrap_or(16)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -278,9 +323,16 @@ pub struct SecretDef {
 pub struct PortDef {
     pub default: u16,
     /// Scan `default+1..=default+10` when the default is taken by something
-    /// that is not this tool. `false` for ports the engine never probes.
+    /// that is not this tool. `false` for ports the engine never probes. A
+    /// port the app or the user chose is never moved.
     #[serde(default = "default_true")]
     pub pick: bool,
+    /// Offered at install (decision `ports.<name>`), with `default` shown.
+    #[serde(default)]
+    pub ask_on_install: bool,
+    /// Shown in the install prompt; required with `askOnInstall`.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -440,6 +492,9 @@ pub struct Connection {
     pub max_len: Option<usize>,
     /// Base URL consumers connect to, e.g. `http://127.0.0.1:{ports.web}`.
     pub url: String,
+    /// `sharedKey`: the secret every approved consumer receives.
+    #[serde(default)]
+    pub key: Option<String>,
     /// The sign-in for the tool's own web page, when it has one behind a
     /// login Roadie generated (slskd's web UI). Expanded like `url`. Handed
     /// only to the owner and to consumers the user approved, never in status.
@@ -460,6 +515,9 @@ pub enum ConnectionPolicy {
     None,
     Open,
     PerConsumerKey,
+    /// One key (the secret `connection.key` names) for every consumer the
+    /// user approved; they talk to the tool directly with it.
+    SharedKey,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -479,6 +537,11 @@ pub struct FileDef {
     pub format: FileFormat,
     #[serde(default)]
     pub secret: bool,
+    /// Written at install when absent, then the tool's own: updates, starts
+    /// and settings never rewrite it (the tool edits it, e.g. from its web
+    /// UI). Uninstalling without keeping data removes it.
+    #[serde(default)]
+    pub write_once: bool,
     pub content: Value,
 }
 
@@ -608,6 +671,11 @@ pub fn validate(r: &Recipe) -> Vec<ValidationError> {
     if r.revision == 0 {
         err!("/revision", "must be a positive integer; start at 1 and bump it on every change");
     }
+    if let Some(v) = &r.min_roadie {
+        if !catalog::version_at_least(v, "0.0.0") {
+            err!("/minRoadie", "must be a Roadie version such as \"0.6.0\"");
+        }
+    }
 
     // Platforms: declared explicitly, and consistent with the downloads.
     if r.platforms.is_empty() {
@@ -723,9 +791,20 @@ pub fn validate(r: &Recipe) -> Vec<ValidationError> {
         if !seen.insert(format!("secret:{}", s.key)) {
             err!(&format!("/secrets/{i}/key"), "duplicate secret key");
         }
-        let n = s.generate.strip_prefix("hex").and_then(|n| n.parse::<usize>().ok());
-        if !matches!(n, Some(n) if (8..=256).contains(&n) && n % 2 == 0) {
-            err!(&format!("/secrets/{i}/generate"), "must be hex<N> with even N between 8 and 256");
+        let n = s.generate.as_deref().map(|g| g.strip_prefix("hex").and_then(|n| n.parse::<usize>().ok()));
+        if let Some(n) = n {
+            if !matches!(n, Some(n) if (8..=256).contains(&n) && n % 2 == 0) {
+                err!(&format!("/secrets/{i}/generate"), "must be hex<N> with even N between 8 and 256");
+            }
+        }
+        let n = n.flatten();
+        if (s.ask_on_install || s.required()) && s.label.as_deref().is_none_or(|l| l.trim().is_empty()) {
+            err!(&format!("/secrets/{i}/label"), "required with askOnInstall or without generate: the install prompt names the secret by it");
+        }
+        match (s.min_len, n) {
+            (Some(m), Some(n)) if m == 0 || m > n => err!(&format!("/secrets/{i}/minLen"), format!("must be between 1 and the generated length ({n})")),
+            (Some(0), None) => err!(&format!("/secrets/{i}/minLen"), "must be at least 1"),
+            _ => {}
         }
     }
     for (k, p) in &r.ports {
@@ -734,6 +813,9 @@ pub fn validate(r: &Recipe) -> Vec<ValidationError> {
         }
         if p.default == 0 {
             err!(&format!("/ports/{k}/default"), "must be 1–65535");
+        }
+        if p.ask_on_install && p.label.as_deref().is_none_or(|l| l.trim().is_empty()) {
+            err!(&format!("/ports/{k}/label"), "required with askOnInstall: the install prompt names the port by it");
         }
     }
     for (i, f) in r.config.iter().enumerate() {
@@ -781,6 +863,9 @@ pub fn validate(r: &Recipe) -> Vec<ValidationError> {
         let p = |field: &str| format!("/configuration/{i}/{field}");
         if e.entry.is_empty() || e.entry.split('.').any(|s| !is_valid_key(s)) {
             err!(&p("entry"), "must be a dotted path of identifiers, e.g. `shares.directories`");
+        }
+        if e.entry.starts_with(SECRET_DECISION) || e.entry.starts_with(PORT_DECISION) {
+            err!(&p("entry"), "`secrets.` and `ports.` name install decisions; nest the entry under another key");
         }
         if !seen.insert(format!("config:{}", e.entry)) {
             err!(&p("entry"), "duplicate entry, or it repeats a config key");
@@ -833,6 +918,7 @@ pub fn validate(r: &Recipe) -> Vec<ValidationError> {
                 (!r.ports.is_empty(), "/ports"),
                 (r.start_after_install.is_some(), "/startAfterInstall"),
                 (r.autostart.is_some(), "/autostart"),
+                (r.singleton, "/singleton"),
             ] {
                 if present {
                     err!(p, "not allowed for a cli recipe");
@@ -876,6 +962,15 @@ pub fn validate(r: &Recipe) -> Vec<ValidationError> {
                     check_placeholders(r, v, &pointer, all_roots, &mut errs);
                 }
             }
+        }
+        if c.policy == ConnectionPolicy::SharedKey {
+            match &c.key {
+                None => err!("/connection/key", "required for sharedKey: name the secret every approved consumer receives, e.g. \"apiKey\""),
+                Some(k) if !r.secrets.iter().any(|s| &s.key == k) => err!("/connection/key", format!("`{k}` names no entry in /secrets")),
+                _ => {}
+            }
+        } else if c.key.is_some() {
+            err!("/connection/key", "only a sharedKey connection hands out a key; drop it or set policy to sharedKey");
         }
         if c.policy == ConnectionPolicy::PerConsumerKey {
             if let (Some(a), Some(b)) = (c.min_len, c.max_len) {
@@ -1143,31 +1238,16 @@ impl Recipe {
     }
 }
 
-// --- Loading ---
-
-pub const BUILTIN: &[(&str, &str)] = &[
-    ("slskd", include_str!("../../../recipes/slskd.json")),
-    ("yt-dlp", include_str!("../../../recipes/yt-dlp.json")),
-    ("ffmpeg", include_str!("../../../recipes/ffmpeg.json")),
-];
-
-pub fn load_builtin() -> Vec<Recipe> {
-    BUILTIN
-        .iter()
-        .map(|(name, json)| parse(json).unwrap_or_else(|e| panic!("built-in recipe {name} is invalid: {e:?}")))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn slskd() -> Recipe {
-        parse(BUILTIN[0].1).expect("built-in slskd recipe validates")
+        fixtures::recipe("slskd")
     }
 
     fn with(edit: impl FnOnce(&mut Value)) -> Vec<ValidationError> {
-        let mut v: Value = serde_json::from_str(BUILTIN[0].1).unwrap();
+        let mut v: Value = serde_json::from_str(fixtures::json("slskd")).unwrap();
         edit(&mut v);
         match from_value(v) {
             Ok(_) => vec![],
@@ -1180,23 +1260,20 @@ mod tests {
     }
 
     #[test]
-    fn every_builtin_validates_and_names_match() {
-        for (name, json) in BUILTIN {
-            let r = parse(json).unwrap_or_else(|e| panic!("{name}: {e:?}"));
-            assert_eq!(&r.name, name);
-        }
-        let ffmpeg = load_builtin().into_iter().find(|r| r.name == "ffmpeg").unwrap();
+    fn every_fixture_validates_and_names_match() {
+        assert_eq!(fixtures::all().len(), 3);
+        let ffmpeg = fixtures::recipe("ffmpeg");
         let win = Platform { os: "windows", arch: "x64" };
         assert!(matches!(ffmpeg.source_for(&win), Source::GithubRelease { .. }), "Windows uses the BtbN override");
         assert!(matches!(ffmpeg.source_for(&Platform { os: "darwin", arch: "arm64" }), Source::HtmlIndex { .. }));
         assert_eq!(ffmpeg.layout_for(&win).binaries, vec!["bin/ffmpeg", "bin/ffprobe"]);
         assert!(!ffmpeg.supported_on(&Platform { os: "darwin", arch: "x64" }), "Intel Macs are deliberately unsupported");
-        let ytdlp = load_builtin().into_iter().find(|r| r.name == "yt-dlp").unwrap();
+        let ytdlp = fixtures::recipe("yt-dlp");
         assert_eq!(ytdlp.kind, Kind::Cli);
     }
 
     #[test]
-    fn builtin_slskd_is_valid_and_typed() {
+    fn slskd_is_valid_and_typed() {
         let r = slskd();
         assert_eq!(r.kind, Kind::Daemon);
         assert_eq!(r.main_binary(), "slskd");
@@ -1281,7 +1358,7 @@ mod tests {
         assert!(pointers(&errs).iter().all(|p| *p == "/platforms"), "{errs:?}");
 
         // Overrides count as downloads: ffmpeg lists Windows only through them.
-        let ffmpeg = load_builtin().into_iter().find(|r| r.name == "ffmpeg").unwrap();
+        let ffmpeg = fixtures::recipe("ffmpeg");
         assert!(ffmpeg.has_download_for("windows-x64"));
         assert!(!ffmpeg.has_download_for("darwin-x64"));
         assert_eq!(ffmpeg.platforms, vec!["darwin-arm64", "windows-x64", "windows-arm64"]);
@@ -1385,11 +1462,67 @@ mod tests {
     }
 
     #[test]
+    fn min_roadie_is_a_version() {
+        assert!(with(|v| v["minRoadie"] = Value::String("0.6.0".into())).is_empty());
+        assert_eq!(pointers(&with(|v| v["minRoadie"] = Value::String("next".into()))), vec!["/minRoadie"]);
+        let mut r = slskd();
+        r.min_roadie = Some("0.6.0".into());
+        assert_eq!(serde_json::to_value(&r).unwrap()["minRoadie"], "0.6.0", "kept when a recipe is re-saved");
+        assert!(serde_json::to_value(slskd()).unwrap().get("minRoadie").is_none(), "absent stays absent");
+    }
+
+    #[test]
     fn unknown_fields_are_reported_as_shape_errors() {
         let errs = with(|v| v["bogus"] = Value::Bool(true));
         // serde is lenient on unknown top-level fields by default; that is
         // deliberate so an older Roadie can still read a newer recipe's
         // additive fields. Nothing to assert beyond "still valid".
         assert!(errs.is_empty() || errs[0].pointer.is_empty());
+    }
+
+    #[test]
+    fn slskd_revision_6_shares_one_key_and_owns_its_file() {
+        let r = fixtures::recipe("slskd@6");
+        let c = r.connection.as_ref().unwrap();
+        assert_eq!((c.policy, c.key.as_deref()), (ConnectionPolicy::SharedKey, Some("internalKey")));
+        assert!(r.secrets[0].ask_on_install && r.ports["web"].ask_on_install && r.ports["listen"].ask_on_install);
+        assert!(r.files[0].write_once);
+        assert_eq!(r.min_roadie.as_deref(), Some("0.6.0"));
+    }
+
+    #[test]
+    fn install_time_secrets_ports_and_shared_keys_name_their_pointer() {
+        let shared = |v: &mut Value| {
+            v["connection"]["policy"] = "sharedKey".into();
+            v["connection"].as_object_mut().unwrap().remove("minLen");
+            v["connection"].as_object_mut().unwrap().remove("maxLen");
+        };
+        assert_eq!(pointers(&with(|v| shared(v))), vec!["/connection/key"], "sharedKey names its secret");
+        assert_eq!(pointers(&with(|v| { shared(v); v["connection"]["key"] = "nope".into() })), vec!["/connection/key"]);
+        assert!(with(|v| { shared(v); v["connection"]["key"] = "internalKey".into() }).is_empty());
+        assert_eq!(pointers(&with(|v| v["connection"]["key"] = "internalKey".into())), vec!["/connection/key"], "only sharedKey hands out a key");
+        assert_eq!(pointers(&with(|v| v["secrets"][0]["askOnInstall"] = true.into())), vec!["/secrets/0/label"]);
+        assert_eq!(pointers(&with(|v| v["secrets"][0]["minLen"] = 100.into())), vec!["/secrets/0/minLen"], "longer than it generates");
+        assert_eq!(pointers(&with(|v| v["ports"]["web"]["askOnInstall"] = true.into())), vec!["/ports/web/label"]);
+        assert_eq!(pointers(&with(|v| v["configuration"][0]["entry"] = "ports.web".into())), vec!["/configuration/0/entry"], "ports. is an install decision");
+    }
+
+    #[test]
+    fn a_secret_without_generate_is_required_and_named() {
+        let mut v: Value = serde_json::from_str(fixtures::json("slskd@6")).unwrap();
+        v["secrets"][0].as_object_mut().unwrap().remove("generate");
+        let r = from_value(v.clone()).expect("a required secret is valid");
+        assert!(r.secrets[0].required() && r.secrets[0].generated_len().is_none());
+        v["secrets"][0].as_object_mut().unwrap().remove("label");
+        v["secrets"][0]["askOnInstall"] = false.into();
+        assert_eq!(pointers(&from_value(v).unwrap_err()), vec!["/secrets/0/label"], "the prompt must be able to name what it needs");
+    }
+
+    #[test]
+    fn singleton_is_for_daemons() {
+        assert!(fixtures::recipe("slskd@6").singleton);
+        let mut v: Value = serde_json::from_str(fixtures::json("yt-dlp")).unwrap();
+        v["singleton"] = true.into();
+        assert_eq!(pointers(&from_value(v).unwrap_err()), vec!["/singleton"]);
     }
 }

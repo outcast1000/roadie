@@ -160,6 +160,8 @@ fn cli_starts_the_service_on_demand_and_stops_it() {
     assert_eq!(code, 0, "stderr: {err}");
     assert_eq!(v["name"], "slskd");
     assert_eq!(v["installed"], false);
+    assert_eq!((v["origin"].as_str(), v["available"].as_bool()), (Some("catalog"), Some(true)), "a fresh data dir knows the catalog's tools: {v}");
+    assert!(v["config"].get("shares.directories").is_some(), "status carries configuration entries before install: {v}");
     let health = sb.health().expect("service answers after the CLI started it");
     assert_eq!(health["role"], "service");
     assert_eq!(health["windowConnected"], false, "the CLI is not a window");
@@ -171,7 +173,7 @@ fn cli_starts_the_service_on_demand_and_stops_it() {
     // Exit codes: a cli tool cannot start (1); nonsense is usage (3).
     let (code, v, _) = sb.roadie(&["tool", "start", "yt-dlp"]);
     assert_eq!(code, 1);
-    assert!(v["error"].as_str().unwrap().contains("command-line tool"), "{v}");
+    assert!(v["error"].as_str().unwrap().contains("recipe catalog"), "not trusted until reviewed: {v}");
     let (code, _, err) = sb.roadie(&["tool", "dance", "slskd"]);
     assert_eq!(code, 3);
     assert!(err.contains("usage"), "{err}");

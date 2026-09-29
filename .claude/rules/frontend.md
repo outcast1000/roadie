@@ -20,15 +20,24 @@ overlay. `src/types.ts` mirrors the Rust wire shapes — change it with them.
 
 ## Components
 
-- `ToolRow` — one card per recipe. `stateLabel()` decides the one-line state (draft → not
-  supported → not installed → cli installed → conflicts → running/healthy → starting → stopped);
-  buttons appear per state; `ConfigForm` renders `recipe.config`; the log panel polls
+- `ToolRow` — one card per recipe. `stateLabel()` decides the one-line state (catalog offer →
+  draft → not supported → not installed → cli installed → conflicts → running/healthy → starting
+  → stopped); buttons appear per state; `ConfigForm` renders `recipe.config`; the log panel polls
   `tool_logs` every 3 s while open. Removal is a two-step inline confirm with "keep settings"
-  and "remove everything".
+  and "remove everything". Settings… hides once `configurable` is false (the tool owns its
+  `writeOnce` files). The install form's engine choices (`engineChoices`) show the install folder
+  (`versionsDir`), offered ports and a visible key box (blank = generated). `originBadge()` says catalog / draft / "your recipe". A catalog
+  offer links to its review (Trust there makes it installable). A pending `recipeUpdate` shows
+  "Review recipe update", which calls `tool_update` so the update arrives as a request prompt
+  with its diff. `delisted` is a plain note.
 - `ConfigForm` — password fields show only whether a value exists; blank keeps, Clear sends
   `""`. Path fields use the Tauri dialog; `tccSensitive` paths under macOS-protected folders warn.
 - `RecipeReview` — the trust screen. It must make the download URLs, the run command and env,
   and every rendered file (from a dry run) impossible to miss; Trust and Delete live here.
+  Trust applies to drafts and catalog offers. "Submit to catalog…" (the user's own trusted
+  recipe only, enabled after a dry run resolved and reached the download on this computer)
+  opens `recipe_submission`'s GitHub link, with the file on the clipboard when the link can't
+  carry it. The Tools tab has "Refresh catalog" (`catalog_refresh`).
 - `RequestPrompt` — one pending request; Approve is disabled while the tool's recipe is an
   untrusted draft. An install request shows `InstallPlan` (a dry run: download, paths, files,
   ports) and a `ConfigForm` over the recipe's `askOnInstall`/`required` fields, pre-filled with
@@ -45,8 +54,10 @@ overlay. `src/types.ts` mirrors the Rust wire shapes — change it with them.
 
 - No hardcoded colours: everything goes through the `:root` variables in `App.css`, which has a
   dark scheme. New UI must read in both.
-- Never render a secret. The wire never carries one, so a field named like one appearing in
-  the UI means a backend shape leaked — fix the backend.
+- Never render a secret, with one exception: a recipe secret offered with `askOnInstall` is the
+  user's to see. The card shows it only on the user's click ("Show key", the owner route
+  `tool_secrets`), like the web login. Otherwise the wire never carries a secret, so a field named
+  like one appearing in the UI means a backend shape leaked — fix the backend.
 - Errors stay visible until dismissed (`callout error` with Dismiss), never a toast that fades.
 - `invoke` names are the Rust command names in `commands.rs`; keep them in one place per hook.
   Every command is a relay to the service's API, so a wire shape is the API's shape.

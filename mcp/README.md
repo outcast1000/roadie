@@ -46,7 +46,9 @@ Status and control: `list_tools`, `tool_status`, `start_tool`, `stop_tool`, `res
 Requests (user approves in Roadie): `install_tool`, `uninstall_tool`, `request_status`.
 
 Recipe authoring: `recipe_schema`, `list_recipes`, `get_recipe`, `validate_recipe`,
-`write_recipe` (draft), `dryrun_recipe`, `delete_recipe`.
+`write_recipe` (draft), `dryrun_recipe`, `delete_recipe`, `submit_recipe` (the file and a GitHub
+link for proposing it to the [recipe catalog](https://github.com/outcast1000/roadie-recipes);
+it submits nothing).
 
 ## Tests
 

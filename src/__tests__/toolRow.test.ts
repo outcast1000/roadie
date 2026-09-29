@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeDefer, formatBytes, stateLabel } from "../components/ToolRow";
+import { describeDefer, formatBytes, originBadge, stateLabel } from "../components/ToolRow";
 import type { ToolRow } from "../types";
 
 const base: ToolRow = {
@@ -37,11 +37,18 @@ const base: ToolRow = {
   reportedVersion: null,
   healthDetail: null,
   installDir: null,
+  installing: null,
+  versionsDir: "",
+  configurable: true,
   dataDir: "",
   logsDir: "",
   configFiles: [],
-  origin: "builtin",
+  origin: "user",
   trusted: true,
+  source: "catalog",
+  available: true,
+  recipeUpdate: null,
+  delisted: false,
   submittedBy: null,
 };
 
@@ -57,6 +64,15 @@ describe("stateLabel", () => {
     expect(stateLabel({ ...base, running: true, starting: true }).text).toBe("Starting…");
     expect(stateLabel({ ...base, running: true }).tone).toBe("warn");
     expect(stateLabel(base).text).toBe("Stopped · 0.26.0");
+    expect(stateLabel({ ...base, origin: "catalog", trusted: false, installed: false }).text).toMatch(/Available/);
+    expect(stateLabel({ ...base, origin: "catalog", trusted: false, supported: false }).text).toMatch(/Not available/);
+  });
+
+  it("badges drafts, catalog offers and the user's own recipes, not catalog ones they trusted", () => {
+    expect(originBadge({ origin: "catalog", source: "catalog" })).toBe("catalog");
+    expect(originBadge({ origin: "draft", source: "user" })).toBe("draft");
+    expect(originBadge({ origin: "user", source: "user" })).toBe("your recipe");
+    expect(originBadge({ origin: "user", source: "catalog" })).toBeNull();
   });
 });
 

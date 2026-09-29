@@ -7,7 +7,7 @@
 //! restart, which is the right default for "someone asked to install X".
 
 use crate::events;
-use crate::recipe::store::Change;
+use crate::recipe::store::{Change, RecipeSource};
 use crate::recipe::{FieldKind, Recipe};
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -38,12 +38,23 @@ pub enum RequestKind {
         recipe: Option<Box<Recipe>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         recipe_change: Option<Change>,
+        /// Where `recipe` came from: `catalog` when it is the recipe
+        /// catalog's (approving then records that source).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recipe_source: Option<RecipeSource>,
     },
     Uninstall { tool: String, keep_data: bool },
     /// An installed tool's client brought a different recipe (a newer
     /// revision, say). Approving trusts it, re-renders the tool's files and
     /// updates the tool; a busy daemon is not restarted (staged as usual).
-    ReplaceRecipe { tool: String, recipe: Box<Recipe>, recipe_change: Change },
+    ReplaceRecipe {
+        tool: String,
+        recipe: Box<Recipe>,
+        recipe_change: Change,
+        /// `catalog` for the catalog's newer revision (a recipe update).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recipe_source: Option<RecipeSource>,
+    },
     /// A consumer wants this tool's connection details.
     Connect {
         consumer: String,
@@ -89,16 +100,19 @@ pub struct Request {
 /// Build an install request, routing password fields out of the public
 /// `config` so a request can be listed without leaking them. The values
 /// must already have passed `state::validate_patch`. `proposed` is set when
-/// `recipe` is one the client brought and it is not the trusted one.
-pub fn install_kind(recipe: &Recipe, values: Map<String, Value>, consumer: Option<String>, proposed: Option<Change>) -> RequestKind {
+/// `recipe` is one the client brought (or the catalog's) and it is not the
+/// trusted one; `source` says which.
+pub fn install_kind(recipe: &Recipe, values: Map<String, Value>, consumer: Option<String>, proposed: Option<Change>, source: RecipeSource) -> RequestKind {
     let mut config = Map::new();
     let mut secrets = Map::new();
     for (k, v) in values {
-        match recipe.config_field(&k).map(|f| f.kind) {
-            Some(FieldKind::Password) => {
+        // A secret an app chose (`secrets.<key>`) is as private as a password.
+        let secret = k.starts_with(crate::recipe::SECRET_DECISION) || recipe.config_field(&k).map(|f| f.kind) == Some(FieldKind::Password);
+        match secret {
+            true => {
                 secrets.insert(k, v);
             }
-            _ => {
+            false => {
                 config.insert(k, v);
             }
         }
@@ -112,6 +126,7 @@ pub fn install_kind(recipe: &Recipe, values: Map<String, Value>, consumer: Optio
         secret_keys,
         recipe: proposed.map(|_| Box::new(recipe.clone())),
         recipe_change: proposed,
+        recipe_source: proposed.map(|_| source),
     }
 }
 
@@ -214,7 +229,7 @@ mod tests {
 
     #[test]
     fn identical_pending_requests_collapse_and_status_moves() {
-        let install = || RequestKind::Install { tool: "t-collapse".into(), consumer: None, config: Map::new(), secrets: Map::new(), secret_keys: vec![], recipe: None, recipe_change: None };
+        let install = || RequestKind::Install { tool: "t-collapse".into(), consumer: None, config: Map::new(), secrets: Map::new(), secret_keys: vec![], recipe: None, recipe_change: None, recipe_source: None };
         let a = create(install(), "test");
         let b = create(install(), "test");
         assert_eq!(a.id, b.id);
@@ -231,11 +246,11 @@ mod tests {
 
     #[test]
     fn install_decisions_split_secrets_out_of_the_public_shape() {
-        let recipe = crate::recipe::load_builtin().remove(0);
+        let recipe = crate::recipe::fixtures::recipe("slskd");
         let mut values = Map::new();
         values.insert("soulseekUsername".into(), Value::String("bj".into()));
         values.insert("soulseekPassword".into(), Value::String("hunter2".into()));
-        let kind = install_kind(&recipe, values, Some("viboplr".into()), None);
+        let kind = install_kind(&recipe, values, Some("viboplr".into()), None, RecipeSource::User);
         let RequestKind::Install { config, secrets, secret_keys, .. } = &kind else { panic!() };
         assert_eq!(config["soulseekUsername"], "bj");
         assert_eq!(secrets["soulseekPassword"], "hunter2");

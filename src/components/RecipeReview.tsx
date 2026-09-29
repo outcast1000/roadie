@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { DryRun, RecipeChange, StoredRecipe } from "../types";
+import { invoke } from "@tauri-apps/api/core";
+import type { DryRun, RecipeChange, StoredRecipe, Submission } from "../types";
 import { recipeChangeText } from "../install";
 import { platformLabel } from "../search";
 
@@ -23,6 +24,8 @@ export function RecipeReview({ stored, dryRun, onTrust, onDelete, onClose, broug
   const [dryError, setDryError] = useState<string | null>(null);
   const [showJson, setShowJson] = useState(false);
   const [working, setWorking] = useState(false);
+  const [submitNote, setSubmitNote] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -39,6 +42,28 @@ export function RecipeReview({ stored, dryRun, onTrust, onDelete, onClose, broug
     };
   }, [r.name, dryRun]);
 
+  // Only a recipe the user trusted, not the catalog's own, and only once it
+  // resolved and its download answered on this computer.
+  const submittable = !brought && stored.origin === "user" && stored.source !== "catalog";
+  const triedHere = !!dry && dry.supported && !dry.resolveError && dry.assetReachable === true;
+  const submit = async () => {
+    setSubmitError(null);
+    setSubmitNote(null);
+    try {
+      const s = await invoke<Submission>("recipe_submission", { name: r.name });
+      if (s.clipboardFallback) await navigator.clipboard.writeText(s.file);
+      await invoke("tool_open_url", { url: s.submitUrl });
+      setSubmitNote(
+        s.clipboardFallback
+          ? `The recipe is on your clipboard. On GitHub, paste it ${s.isUpdate ? "over the current file" : "as the file's contents"}, then propose the change: GitHub opens a pull request from your account.`
+          : "GitHub shows the file filled in. Propose it there: GitHub opens a pull request from your account.",
+      );
+    } catch (e) {
+      console.error("Failed to prepare the submission:", e);
+      setSubmitError(String(e));
+    }
+  };
+
   const source = r.source as Record<string, unknown>;
   const urls: string[] = [];
   if (source.kind === "githubRelease") urls.push(`https://github.com/${String(source.repo)}/releases`);
@@ -51,7 +76,7 @@ export function RecipeReview({ stored, dryRun, onTrust, onDelete, onClose, broug
         <div>
           <h2>{r.displayName}</h2>
           <span className={`badge origin-${stored.origin}`}>
-            {brought ? `from ${brought.requestedBy}` : stored.origin === "draft" ? `draft${stored.submittedBy ? ` from ${stored.submittedBy}` : ""}` : stored.origin}
+            {brought ? `from ${brought.requestedBy}` : stored.origin === "draft" ? `draft${stored.submittedBy ? ` from ${stored.submittedBy}` : ""}` : stored.origin === "catalog" || stored.source === "catalog" ? "from the recipe catalog" : stored.origin}
           </span>
           <span className={`badge kind-${r.kind}`}>{r.kind}</span>
         </div>
@@ -179,8 +204,23 @@ export function RecipeReview({ stored, dryRun, onTrust, onDelete, onClose, broug
       </button>
       {showJson ? <pre className="mono json">{JSON.stringify(r, null, 2)}</pre> : null}
 
+      {submitNote ? <div className="callout">{submitNote}</div> : null}
+      {submitError ? (
+        <div className="callout error">
+          <pre>{submitError}</pre>
+          <button className="ghost small" onClick={() => setSubmitError(null)}>
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+
       <div className="actions review-actions">
-        {onDelete && stored.origin !== "builtin" ? (
+        {submittable ? (
+          <button className="ghost" disabled={!triedHere} title={triedHere ? "Propose this recipe to the Roadie recipe catalog on GitHub" : "Available once the recipe resolves and its download answers on this computer"} onClick={() => void submit()}>
+            Submit to catalog…
+          </button>
+        ) : null}
+        {onDelete && (stored.origin === "user" || stored.origin === "draft") ? (
           <button
             className="ghost danger"
             disabled={working}
@@ -199,7 +239,7 @@ export function RecipeReview({ stored, dryRun, onTrust, onDelete, onClose, broug
             Back to the request
           </button>
         ) : null}
-        {onTrust && stored.origin === "draft" ? (
+        {onTrust && (stored.origin === "draft" || stored.origin === "catalog") ? (
           <button
             className="primary"
             disabled={working}

@@ -19,7 +19,7 @@ fn recipe_matches(t: &Target, call: Call) -> Result<Option<bool>, String> {
     let (Some(v), Some(file)) = (&t.recipe, &t.file) else { return Ok(None) };
     let stored = call("GET", &format!("/v1/recipes/{}", enc(&t.name)), None)
         .map_err(|_| format!("Roadie has no recipe named {} yet; install it with `roadie tool install {file}`", t.name))?;
-    let trusted = stored.get("origin").and_then(|o| o.as_str()) != Some("draft");
+    let trusted = matches!(stored.get("origin").and_then(|o| o.as_str()), Some("user" | "builtin"));
     let same = match (crate::recipe::from_value(v.clone()), stored.get("recipe").cloned().map(crate::recipe::from_value)) {
         (Ok(a), Some(Ok(b))) => crate::recipe::store::same(&a, &b),
         _ => false,
@@ -70,7 +70,19 @@ pub fn run_client(root: &std::path::Path, argv_in: &[String]) -> Result<(i32, Va
 
     let tool_arg = argv.get(2).map(|a| target(a)).transpose()?;
     match (cmd, argv.get(1).map(String::as_str), tool_arg) {
-        ("tool", Some("list"), _) => Ok((0, call("GET", "/v1/tools", None)?)),
+        ("tool", Some("list"), _) => {
+            if has(argv, "--refresh") {
+                if let Err(e) = call("POST", "/v1/catalog/refresh", None) {
+                    eprintln!("roadie: the recipe catalog could not be refreshed ({e}); listing the cached one");
+                }
+            }
+            Ok((0, call("GET", "/v1/tools", None)?))
+        }
+        ("catalog", Some("refresh"), _) => match call("POST", "/v1/catalog/refresh", None) {
+            Ok(v) => Ok((0, v)),
+            Err(e) => Ok((1, json!({ "error": e }))),
+        },
+        ("catalog", Some("status") | None, _) => Ok((0, call("GET", "/v1/catalog", None)?)),
         ("tool", Some("status"), Some(t)) => {
             let m = recipe_matches(&t, &call)?;
             Ok((0, annotate(call("GET", &format!("/v1/tools/{}", enc(&t.name)), None)?, m)))
@@ -80,6 +92,16 @@ pub fn run_client(root: &std::path::Path, argv_in: &[String]) -> Result<(i32, Va
             let route = if action == "check" { "check-updates" } else { action };
             match call("POST", &format!("/v1/tools/{}/{route}", enc(&t.name)), None) {
                 Ok(v) => Ok((0, annotate(v, m))),
+                Err(e) => Ok((1, json!({ "error": e }))),
+            }
+        }
+        ("tool", Some("options"), Some(t)) => {
+            let out = match &t.recipe {
+                Some(r) => call("POST", &format!("/v1/tools/{}/options", enc(&t.name)), Some(json!({ "recipe": r }))),
+                None => call("GET", &format!("/v1/tools/{}/options", enc(&t.name)), None),
+            };
+            match out {
+                Ok(v) => Ok((0, v)),
                 Err(e) => Ok((1, json!({ "error": e }))),
             }
         }

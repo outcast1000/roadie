@@ -25,7 +25,16 @@ export function describeDefer(reason: DeferReason): string {
   }
 }
 
+/** The card's origin badge: drafts and catalog offers say so, a recipe the user wrote says it is theirs. */
+export function originBadge(t: Pick<Row, "origin" | "source">): string | null {
+  if (t.origin === "draft") return "draft";
+  if (t.origin === "catalog") return "catalog";
+  if (t.origin === "user" && t.source !== "catalog") return "your recipe";
+  return null;
+}
+
 export function stateLabel(t: Row): { text: string; tone: "muted" | "ok" | "warn" | "error" } {
+  if (t.origin === "catalog") return t.supported ? { text: "Available — review the recipe to install", tone: "muted" } : { text: "Not available for this computer", tone: "muted" };
   if (!t.trusted) return { text: "Draft recipe — review before installing", tone: "warn" };
   if (!t.supported) return { text: "Not available for this computer", tone: "muted" };
   if (!t.installed) return { text: "Not installed", tone: "muted" };
@@ -83,6 +92,9 @@ export function ToolRow({ tool: t, recipe, tools, highlighted, onReview, onRevok
   // Fetched on the click, never kept in status: it is the web page's password.
   const [webLogin, setWebLogin] = useState<{ username: string; password: string } | null>(null);
   const [webLoginError, setWebLoginError] = useState<string | null>(null);
+  const [keys, setKeys] = useState<Record<string, { label: string | null; value: string }> | null>(null);
+  const [keysError, setKeysError] = useState<string | null>(null);
+  const showableKeys = (recipe?.recipe.secrets ?? []).some((s) => s.askOnInstall);
   const [logText, setLogText] = useState("");
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [askingInstall, setAskingInstall] = useState(false);
@@ -90,7 +102,7 @@ export function ToolRow({ tool: t, recipe, tools, highlighted, onReview, onRevok
   const progress = progressText(tools.installing[t.name]);
   const label = stateLabel(t);
   const fields: ConfigField[] = recipeFields(recipe?.recipe);
-  const decisions = installFields(fields, recipe?.recipe);
+  const decisions = installFields(fields, recipe?.recipe, t.versionsDir);
   const installProgress = tools.installing[t.name];
   const error = tools.errors[t.name];
 
@@ -115,7 +127,7 @@ export function ToolRow({ tool: t, recipe, tools, highlighted, onReview, onRevok
         <div className="tool-title">
           <h2>{t.displayName}</h2>
           <span className={`badge kind-${t.kind}`}>{t.kind === "daemon" ? "runs in background" : "command-line tool"}</span>
-          {t.origin !== "builtin" ? <span className={`badge origin-${t.origin}`}>{t.origin === "draft" ? "draft" : "your recipe"}</span> : null}
+          {originBadge(t) ? <span className={`badge origin-${t.origin}`}>{originBadge(t)}</span> : null}
         </div>
         <span className={`state tone-${label.tone}`}>{busy ? `${busy}…` : progress || label.text}</span>
       </header>
@@ -141,11 +153,29 @@ export function ToolRow({ tool: t, recipe, tools, highlighted, onReview, onRevok
         </div>
       ) : null}
 
-      {!t.trusted ? (
+      {t.origin === "catalog" ? (
+        <div className="callout">
+          From the Roadie recipe catalog, not reviewed on this computer yet. Read what it downloads and runs, then trust it to install.
+          <button onClick={() => onReview(t.name)}>Review recipe</button>
+        </div>
+      ) : !t.trusted ? (
         <div className="callout warn">
           This recipe was submitted{t.submittedBy ? ` by ${t.submittedBy}` : ""} and has not been reviewed. Read what it downloads and runs before trusting it.
           <button onClick={() => onReview(t.name)}>Review recipe</button>
         </div>
+      ) : null}
+
+      {t.recipeUpdate ? (
+        <div className="callout">
+          The recipe catalog has revision {t.recipeUpdate.revision} of this recipe (you trusted {t.revision})
+          {t.recipeUpdate.changedKeys.length ? `; it changes ${t.recipeUpdate.changedKeys.join(", ")}` : ""}. Nothing changes until you review it.
+          <button disabled={!!busy} onClick={() => void tools.update(t.name)}>
+            Review recipe update
+          </button>
+        </div>
+      ) : null}
+      {t.delisted ? (
+        <div className="callout">No longer in the recipe catalog. It keeps working with the recipe you trusted, without recipe updates.</div>
       ) : null}
 
       {t.conflict === "startFailed" && t.conflictDetail ? (
@@ -233,7 +263,27 @@ export function ToolRow({ tool: t, recipe, tools, highlighted, onReview, onRevok
             Stop
           </button>
         ) : null}
-        {t.installed && fields.length > 0 ? (
+        {t.installed && showableKeys ? (
+          <button
+            className="ghost"
+            onClick={() => {
+              if (keys) {
+                setKeys(null);
+                return;
+              }
+              setKeysError(null);
+              invoke<Record<string, { label: string | null; value: string }>>("tool_secrets", { name: t.name })
+                .then(setKeys)
+                .catch((e) => {
+                  console.error("Failed to read the key:", e);
+                  setKeysError(String(e));
+                });
+            }}
+          >
+            {keys ? "Hide key" : "Show key"}
+          </button>
+        ) : null}
+        {t.installed && t.configurable && fields.length > 0 ? (
           <button className="ghost" onClick={() => setShowConfig((s) => !s)}>
             {showConfig ? "Hide settings" : "Settings…"}
           </button>
@@ -367,6 +417,24 @@ export function ToolRow({ tool: t, recipe, tools, highlighted, onReview, onRevok
         </div>
       ) : null}
       {webLoginError ? <div className="error">Couldn't read the login: {webLoginError}</div> : null}
+      {keys
+        ? Object.entries(keys).map(([k, v]) => (
+            <div key={k} className="web-login">
+              <span>
+                {v.label || k}: <code>{v.value}</code>
+              </span>
+              <button className="ghost small" onClick={() => void navigator.clipboard.writeText(v.value).catch((e) => console.error("Failed to copy the key:", e))}>
+                Copy
+              </button>
+            </div>
+          ))
+        : null}
+      {keysError ? <div className="error">Couldn't read the key: {keysError}</div> : null}
+      {t.installed && !t.configurable ? (
+        <p className="muted small">
+          {t.displayName} manages its own settings since it was installed{t.url && t.running ? "; change them in its web UI" : ""}. Roadie keeps installing updates, starting and stopping it.
+        </p>
+      ) : null}
       {showLogs ? (
         <div className="log">
           <div className="log-head">

@@ -17,7 +17,7 @@
 //! window station is visible), because a program that restarts the service
 //! with a doctored environment must not be able to downgrade it to Terminal.
 
-use crate::recipe::store::{self, Change};
+use crate::recipe::store::{self, Change, RecipeSource};
 use crate::recipe::{self, ConfigField, Recipe, Source};
 use crate::tools::DryRun;
 use crate::requests::{Request, RequestKind};
@@ -191,12 +191,16 @@ pub fn refuse_missing(recipe: &Recipe, values: &Map<String, Value>, stored: &Map
 }
 
 /// How a request's own recipe differs from what Roadie has, in words.
-pub fn change_line(change: Change, recipe: &Recipe) -> String {
-    let what = match change {
-        Change::New => "It brings its own recipe for a tool Roadie does not know yet",
-        Change::ReplacesBuiltin => "It brings its own recipe, replacing Roadie's built-in one",
-        Change::ChangesTrusted => "It brings a changed recipe, replacing the one you trusted",
-        Change::ReplacesDraft => "It brings its own recipe, replacing an unreviewed draft",
+/// `source` is where it came from: the asking program, or the catalog.
+pub fn change_line(change: Change, recipe: &Recipe, source: RecipeSource) -> String {
+    let what = match (source, change) {
+        (RecipeSource::Catalog, Change::ChangesTrusted) => "The Roadie recipe catalog has a new revision of this recipe, replacing the one you trusted",
+        (RecipeSource::Catalog, Change::ReplacesDraft) => "The recipe comes from the Roadie recipe catalog, replacing an unreviewed draft",
+        (RecipeSource::Catalog, _) => "The recipe comes from the Roadie recipe catalog and has not been reviewed on this computer",
+        (RecipeSource::User, Change::New) => "It brings its own recipe for a tool Roadie does not know yet",
+        (RecipeSource::User, Change::ReplacesBuiltin) => "It brings its own recipe, replacing Roadie's built-in one",
+        (RecipeSource::User, Change::ChangesTrusted) => "It brings a changed recipe, replacing the one you trusted",
+        (RecipeSource::User, Change::ReplacesDraft) => "It brings its own recipe, replacing an unreviewed draft",
     };
     let by = if recipe.author.trim().is_empty() { "an unnamed author".to_string() } else { clean(&recipe.author, 60) };
     format!("{what}: by {by}, revision {}. Approving trusts it.", recipe.revision)
@@ -259,11 +263,13 @@ pub fn review_lines(proposed: &Recipe, current: Option<&Recipe>, dry: Result<&Dr
 /// recipe.
 pub fn describe(r: &Request, trusted: Option<&Recipe>, stored: &Map<String, Value>, review: &[String]) -> Prompt {
     let by = clean(&r.requested_by, 60);
-    let brought: Option<(&Recipe, Change)> = match &r.kind {
-        RequestKind::Install { recipe: Some(p), recipe_change: Some(c), .. } | RequestKind::ReplaceRecipe { recipe: p, recipe_change: c, .. } => Some((p, *c)),
+    let brought: Option<(&Recipe, Change, RecipeSource)> = match &r.kind {
+        RequestKind::Install { recipe: Some(p), recipe_change: Some(c), recipe_source, .. } | RequestKind::ReplaceRecipe { recipe: p, recipe_change: c, recipe_source, .. } => {
+            Some((p, *c, recipe_source.unwrap_or_default()))
+        }
         _ => None,
     };
-    let recipe = brought.map(|(p, _)| p).or(trusted);
+    let recipe = brought.map(|(p, _, _)| p).or(trusted);
     let name = recipe.map(|r| clean(&r.display_name, 60)).unwrap_or_else(|| r.kind.tool().to_string());
     let provenance = format!("\u{201C}{by}\u{201D} is the name the asking program gave; Roadie cannot verify it.");
     let Some(recipe) = recipe else {
@@ -276,8 +282,8 @@ pub fn describe(r: &Request, trusted: Option<&Recipe>, stored: &Map<String, Valu
         };
     };
     let mut recipe_lines = Vec::new();
-    if let Some((p, change)) = brought {
-        recipe_lines.push(change_line(change, p));
+    if let Some((p, change, source)) = brought {
+        recipe_lines.push(change_line(change, p, source));
         recipe_lines.extend(review.iter().cloned());
     }
     match &r.kind {
@@ -295,7 +301,7 @@ pub fn describe(r: &Request, trusted: Option<&Recipe>, stored: &Map<String, Valu
                 }
             }
             if consumer.is_some() {
-                lines.push(format!("Approving also gives {by} its own access key for {name}."));
+                lines.push(format!("Approving also gives {by} {}.", key_phrase(recipe, &name)));
             }
             let mut decided = Vec::new();
             let mut left_empty = Vec::new();
@@ -317,6 +323,20 @@ pub fn describe(r: &Request, trusted: Option<&Recipe>, stored: &Map<String, Valu
                         left_empty.push(label);
                     }
                 }
+            }
+            match config.get("installDir").and_then(|v| v.as_str()) {
+                Some(dir) => decided.push(format!("Install folder: {}", clean(dir, 200))),
+                None => decided.push("Install folder: Roadie's default".into()),
+            }
+            for (port, def) in recipe.ports.iter().filter(|(_, d)| d.ask_on_install) {
+                let label = clean(def.label.as_deref().unwrap_or(port), 60);
+                let v = config.get(&format!("{}{port}", recipe::PORT_DECISION)).and_then(|v| v.as_u64()).unwrap_or(u64::from(def.default));
+                decided.push(format!("{label}: {v}"));
+            }
+            for s in recipe.secrets.iter().filter(|s| s.ask_on_install) {
+                let label = clean(s.label.as_deref().unwrap_or(&s.key), 60);
+                let given = secret_keys.contains(&format!("{}{}", recipe::SECRET_DECISION, s.key));
+                decided.push(format!("{label}: {}", if given { format!("chosen by {by}") } else { "generated by Roadie".into() }));
             }
             if recipe.kind == recipe::Kind::Daemon {
                 for (key, label, offer) in [("startNow", "Start now", recipe.start_after_install), ("autostart", "Start at login", recipe.autostart)] {
@@ -369,11 +389,19 @@ pub fn describe(r: &Request, trusted: Option<&Recipe>, stored: &Map<String, Valu
         },
         RequestKind::Connect { .. } => Prompt {
             headline: format!("{by} wants to connect to {name}"),
-            lines: vec![format!("It will receive its own access key for {name}."), provenance],
+            lines: vec![format!("It will receive {}.", key_phrase(recipe, &name)), provenance],
             question: format!("Let {by} connect to {name}?"),
             approve: Some("Allow".into()),
             blocked: None,
         },
+    }
+}
+
+/// What an approved app receives, by the recipe's connection policy.
+fn key_phrase(recipe: &Recipe, name: &str) -> String {
+    match recipe.connection.as_ref().map(|c| c.policy) {
+        Some(recipe::ConnectionPolicy::SharedKey) => format!("{name}'s API key, the one every app you allow uses"),
+        _ => format!("its own access key for {name}"),
     }
 }
 
@@ -389,6 +417,11 @@ pub fn describe_here(r: &Request) -> Prompt {
     };
     let effective = brought.or(trusted.as_ref());
     let stored_config = effective.map(|rc| crate::tools::status(rc).config).unwrap_or_default();
+    // Another copy already running: say so before the user approves.
+    let other = match &r.kind {
+        RequestKind::Install { config, .. } => effective.and_then(|rc| crate::tools::other_instance(rc, &crate::intake::chosen_ports(config))),
+        _ => None,
+    };
     let review = match brought {
         Some(p) => {
             let current = store::get(tool).map(|s| s.recipe);
@@ -399,7 +432,11 @@ pub fn describe_here(r: &Request) -> Prompt {
         }
         None => vec![],
     };
-    describe(r, trusted.as_ref(), &stored_config, &review)
+    let mut p = describe(r, trusted.as_ref(), &stored_config, &review);
+    if let Some(o) = other {
+        p.lines.insert(0, format!("Heads-up: {}", clean(&o.message, 300)));
+    }
+    p
 }
 
 // --- Is there a screen? ---
@@ -589,11 +626,11 @@ mod tests {
     }
 
     fn slskd() -> Recipe {
-        recipe::load_builtin().into_iter().find(|r| r.name == "slskd").unwrap()
+        recipe::fixtures::recipe("slskd")
     }
 
     fn install(config: Map<String, Value>, secret_keys: Vec<String>, consumer: Option<&str>) -> RequestKind {
-        RequestKind::Install { tool: "slskd".into(), consumer: consumer.map(str::to_string), config, secrets: Map::new(), secret_keys, recipe: None, recipe_change: None }
+        RequestKind::Install { tool: "slskd".into(), consumer: consumer.map(str::to_string), config, secrets: Map::new(), secret_keys, recipe: None, recipe_change: None, recipe_source: None }
     }
 
     #[test]
@@ -688,22 +725,41 @@ mod tests {
             secrets: Map::new(),
             secret_keys: vec![],
             recipe: Some(Box::new(theirs.clone())),
-            recipe_change: Some(Change::ReplacesBuiltin),
+            recipe_change: Some(Change::ChangesTrusted),
+            recipe_source: None,
         };
         let review = review_lines(&theirs, Some(&current), Err("offline"));
         assert!(review[0].contains("summary"), "names what changed: {review:?}");
         let p = describe(&request(kind, "Viboplr"), Some(&current), &Map::new(), &review);
         let text = p.text();
         assert_eq!(p.approve.as_deref(), Some("Trust and install"));
-        assert!(text.contains("replacing Roadie's built-in one") && text.contains("revision 7"), "{text}");
+        assert!(text.contains("replacing the one you trusted") && text.contains("revision 7"), "{text}");
         assert!(text.contains("their slskd"), "the brought recipe is what is described: {text}");
         assert!(text.contains("github.com/slskd/slskd") && text.contains("Could not preview it: offline"), "{text}");
         assert!(!text.contains('<'), "author text is cleaned: {text}");
 
-        let replace = RequestKind::ReplaceRecipe { tool: "slskd".into(), recipe: Box::new(theirs), recipe_change: Change::ChangesTrusted };
+        let replace = RequestKind::ReplaceRecipe { tool: "slskd".into(), recipe: Box::new(theirs.clone()), recipe_change: Change::ChangesTrusted, recipe_source: None };
         let p = describe(&request(replace, "Viboplr"), Some(&current), &Map::new(), &[]);
         assert_eq!((p.headline.as_str(), p.approve.as_deref()), ("Viboplr asks to change slskd's recipe", Some("Trust and update")));
         assert!(p.text().contains("replacing the one you trusted"));
+
+        // The catalog's recipes say where they come from.
+        let update = RequestKind::ReplaceRecipe { tool: "slskd".into(), recipe: Box::new(theirs.clone()), recipe_change: Change::ChangesTrusted, recipe_source: Some(RecipeSource::Catalog) };
+        let p = describe(&request(update, "roadie CLI"), Some(&current), &Map::new(), &[]);
+        assert!(p.text().contains("Roadie recipe catalog has a new revision"), "{}", p.text());
+        let first = RequestKind::Install {
+            tool: "slskd".into(),
+            consumer: None,
+            config: Map::new(),
+            secrets: Map::new(),
+            secret_keys: vec![],
+            recipe: Some(Box::new(theirs)),
+            recipe_change: Some(Change::New),
+            recipe_source: Some(RecipeSource::Catalog),
+        };
+        let p = describe(&request(first, "An App"), None, &Map::new(), &[]);
+        assert!(p.text().contains("comes from the Roadie recipe catalog"), "{}", p.text());
+        assert_eq!(p.approve.as_deref(), Some("Trust and install"));
     }
 
     #[test]
@@ -742,5 +798,38 @@ mod tests {
         assert_eq!(dialog::mac_answer("Install\n", None), dialog::Answer::Dismissed, "a blocked prompt cannot approve");
 
         assert!(dialog::windows_text(&p).contains("Yes: install."));
+    }
+
+    #[test]
+    fn the_prompt_warns_about_another_running_copy() {
+        crate::recipe::store::test_root();
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut c in l.incoming().flatten() {
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 2048];
+                let _ = c.read(&mut buf);
+                let _ = c.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+        });
+        let mut r = recipe::fixtures::recipe("slskd@6");
+        r.name = "prompt-other".into();
+        // Another platform only, so the review's dry run needs no network.
+        let other = if recipe::Platform::current().os == "darwin" { "windows-x64" } else { "darwin-arm64" };
+        r.platforms = vec![other.into()];
+        r.ports.get_mut("web").unwrap().default = port;
+        let kind = RequestKind::Install {
+            tool: r.name.clone(),
+            consumer: None,
+            config: Map::new(),
+            secrets: Map::new(),
+            secret_keys: vec![],
+            recipe: Some(Box::new(r)),
+            recipe_change: Some(Change::New),
+            recipe_source: None,
+        };
+        let p = describe_here(&request(kind, "An App"));
+        assert!(p.lines[0].starts_with("Heads-up: Another slskd is already running") && p.lines[0].contains("will not start"), "{:?}", p.lines);
     }
 }

@@ -139,6 +139,14 @@ pub fn run(data_root: PathBuf) -> i32 {
     }
     paths::init(data_root.clone());
     recipe::store::load_all();
+    // A data dir that never had the catalog fetches it before answering, so
+    // the first `tool status` finds the catalog's tools; afterwards the
+    // cache serves and the catalog thread keeps it fresh.
+    if recipe::catalog::index_names().is_none() && api::probe(&data_root).is_none() {
+        if let Err(e) = recipe::store::refresh_catalog() {
+            log::warn!("recipe catalog: {e}; starting without it");
+        }
+    }
 
     // Already running (same data dir)? Then this launch is a no-op.
     if let Some(health) = api::probe(&data_root) {
@@ -191,6 +199,23 @@ pub fn run(data_root: PathBuf) -> i32 {
         });
 
         touch();
+        // The recipe catalog: fetched when the cache is stale (the TTL is
+        // hours; checking is a file read), and the window told when it was.
+        std::thread::Builder::new()
+            .name("catalog".into())
+            .spawn(|| loop {
+                if recipe::catalog::refresh_if_stale() {
+                    recipe::store::load_all();
+                    events::emit("recipe-changed", serde_json::json!({ "origin": "catalog" }));
+                }
+                for _ in 0..(10 * 2) {
+                    std::thread::sleep(Duration::from_secs(30));
+                    if STOPPING.load(Ordering::SeqCst) {
+                        return;
+                    }
+                }
+            })
+            .ok();
         // Reconcile shortly after launch, then the daily update pass.
         std::thread::Builder::new()
             .name("reconcile".into())

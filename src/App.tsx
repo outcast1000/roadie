@@ -26,6 +26,20 @@ export default function App() {
   const [consumers, setConsumers] = useState<ConsumerPublic[]>([]);
   const [intentError, setIntentError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [refreshingCatalog, setRefreshingCatalog] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const refreshCatalog = async () => {
+    setRefreshingCatalog(true);
+    setCatalogError(null);
+    try {
+      await invoke("catalog_refresh");
+    } catch (e) {
+      console.error("Failed to refresh the recipe catalog:", e);
+      setCatalogError(String(e));
+    }
+    setRefreshingCatalog(false);
+    void tools.refresh();
+  };
   const [serviceDown, setServiceDown] = useState<string | null>(null);
 
   const loadConsumers = useCallback(() => {
@@ -153,7 +167,7 @@ export default function App() {
 
         {broughtRequest?.recipe && broughtRequest.recipeChange ? (
           <RecipeReview
-            stored={{ recipe: broughtRequest.recipe, origin: "draft", submittedBy: broughtRequest.requestedBy }}
+            stored={{ recipe: broughtRequest.recipe, origin: "draft", source: "user", submittedBy: broughtRequest.requestedBy }}
             dryRun={dryRunBroughtReview}
             brought={{ requestedBy: broughtRequest.requestedBy, change: broughtRequest.recipeChange }}
             onClose={() => setReviewingRequest(null)}
@@ -180,6 +194,17 @@ export default function App() {
                 <span className="muted count">
                   {query ? `${visibleTools.length} of ${tools.tools.length}` : `${tools.tools.length} recipe${tools.tools.length === 1 ? "" : "s"}`}
                 </span>
+                <button className="ghost small" disabled={refreshingCatalog} onClick={() => void refreshCatalog()} title="Fetch the Roadie recipe catalog now">
+                  {refreshingCatalog ? "Refreshing…" : "Refresh catalog"}
+                </button>
+              </div>
+            ) : null}
+            {catalogError ? (
+              <div className="callout error">
+                <pre>The recipe catalog could not be refreshed; showing the copy Roadie has. {catalogError}</pre>
+                <button className="ghost small" onClick={() => setCatalogError(null)}>
+                  Dismiss
+                </button>
               </div>
             ) : null}
             {!tools.loaded ? <p className="muted">Loading…</p> : null}
@@ -195,7 +220,14 @@ export default function App() {
                 dryRun={recipes.dryRun}
               />
             ))}
-            {tools.loaded && tools.tools.length === 0 ? <p className="muted">No recipes found.</p> : null}
+            {tools.loaded && tools.tools.length === 0 ? (
+              <p className="muted">
+                No recipes yet. Roadie gets them from the recipe catalog.{" "}
+                <button className="ghost small" disabled={refreshingCatalog} onClick={() => void refreshCatalog()}>
+                  {refreshingCatalog ? "Refreshing…" : "Refresh catalog"}
+                </button>
+              </p>
+            ) : null}
             {tools.loaded && tools.tools.length > 0 && visibleTools.length === 0 ? (
               <p className="muted">No recipe matches “{query}”. Try a tool name, an author, or an OS such as “windows”.</p>
             ) : null}

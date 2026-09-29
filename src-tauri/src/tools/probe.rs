@@ -17,7 +17,7 @@ fn probe_slskd_install_start_stop() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     paths::init(root.clone());
-    let recipe = recipe::load_builtin().remove(0);
+    let recipe = recipe::fixtures::recipe("slskd");
 
     let t0 = Instant::now();
     let st = install(&recipe, &mut |phase, done, total| eprintln!("  {phase:?} {done} / {total:?}")).expect("install");

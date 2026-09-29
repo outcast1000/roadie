@@ -6,7 +6,13 @@ Recipes never contain secrets or user values — those live in the tool's `state
 
 Validation reports every error with a JSON pointer (`/files/0/content/web/port`) and a message,
 so fix the named field and re-validate. `GET /v1/recipes/schema` returns this text plus a full
-built-in example. Copy the closest built-in and edit it.
+example from the recipe catalog. Copy the closest catalog recipe (`GET /v1/recipes/<name>`) and
+edit it.
+
+Roadie ships no recipes. It gets them from the recipe catalog,
+[`outcast1000/roadie-recipes`](https://github.com/outcast1000/roadie-recipes): one file per tool,
+added or changed by pull request, and reviewed by the user before Roadie installs it. To publish
+a recipe, open a pull request there (its CONTRIBUTING.md has the rules).
 
 ## Top level
 
@@ -16,6 +22,8 @@ built-in example. Copy the closest built-in and edit it.
 | `name` | string | `^[a-z0-9][a-z0-9-]{0,31}$`, unique across all recipes |
 | `author` | string | required; who maintains the recipe (a person, project or organisation). Shown on the card and the review screen |
 | `revision` | integer ≥ 1 | required; the recipe's own edition. Start at 1 and bump it on every change. Not the tool's version, not `recipeVersion` |
+| `singleton` | bool | daemon only; the tool runs one copy per computer, so a second refuses to start whatever its port. Before an install Roadie then looks for another running copy on the default ports too, and the warning says Roadie's copy will not start until it is quit |
+| `minRoadie` | string | optional; the oldest Roadie that runs this recipe correctly (`"0.6.0"`). Set it when the recipe uses a field a Roadie release added: an older Roadie ignores fields it does not know, so the catalog hides the recipe from it |
 | `platforms` | `[ "<platform>" ]` | required; the platforms this recipe targets. Every listed platform must have a download in `source` or an override, and every download must be listed |
 | `displayName`, `summary`, `homepage`, `license`, `notes` | string | `notes` is free text for consumers (e.g. "never pass `-U`") |
 | `kind` | `"daemon"` \| `"cli"` | daemons run and are health-checked; cli tools are installed and exposed as `bin/<name>` |
@@ -24,13 +32,13 @@ built-in example. Copy the closest built-in and edit it.
 | `layout` | `{ stripTopDir, binaries }` | `binaries[0]` is the main binary; relative paths inside the archive; `.exe` is added on Windows |
 | `minBinaryBytes` | number | size floor for the main binary (catches HTML error pages) |
 | `version` | `{ args, regex, timeoutSec }` | run after extraction; the regex's first capture must agree with the resolved version |
-| `secrets` | `[ { key, generate: "hex<N>" } ]` | generated once, stored in state, available as `{secrets.key}` |
-| `ports` | `{ name: { default, pick } }` | daemon only; `pick: true` scans `default+1..+10` when the default is taken by something else |
+| `secrets` | `[ { key, generate: "hex<N>", askOnInstall, label, minLen } ]` | generated once, stored in state, available as `{secrets.key}`. With `askOnInstall` (and a `label`), the installing app or the user may choose the value instead (decision `secrets.<key>`, at least `minLen` characters, default 16), and the user can see it on the tool's card |
+| `ports` | `{ name: { default, pick, askOnInstall, label } }` | daemon only; `pick: true` scans `default+1..+10` when the default is taken by something else. With `askOnInstall` (and a `label`) the app or user may choose it (decision `ports.<name>`); a chosen port is never moved |
 | `config` | `[ ConfigField ]` | user-editable values (below) |
 | `configuration` | `[ ConfigEntry ]` | settings of the tool's own config file an installing app or the user may set, by their real key there (below) |
-| `connection` | `{ policy, minLen, maxLen, url, webLogin }` | `policy`: `none` \| `open` \| `perConsumerKey`. `webLogin` (optional): `{ username, password }` for the tool's own web page, placeholders allowed (below) |
+| `connection` | `{ policy, key, minLen, maxLen, url, webLogin }` | `policy`: `none` \| `open` \| `perConsumerKey` (each approved app gets its own key, listed in the config with `$each: "consumers"`) \| `sharedKey` (every approved app gets the one secret `key` names, and talks to the tool directly with it). `webLogin` (optional): `{ username, password }` for the tool's own web page, placeholders allowed (below) |
 | `createDirs` | `[ string ]` | created before start (tools that refuse a missing directory) |
-| `files` | `[ FileDef ]` | config files written before every start |
+| `files` | `[ FileDef ]` | config files written before every start, unless `writeOnce` |
 | `run` | `{ args, env, cwd, startupGraceSec }` | daemon only, required |
 | `health` | `{ request, unauthorizedStatus, extract }` | daemon only, required |
 | `busy` | `{ requests, busyIf: { path, regex } }` | when any reply has a value at `path` matching `regex`, the daemon is busy and must not be restarted |
@@ -118,6 +126,50 @@ level, each `{ "default": true|false, "askOnInstall": true|false }`; the prompt 
 default and the user can flip it. Passing either key for a recipe that does not offer it is a
 422. Roadie's own Start/Stop on the tool's card work regardless.
 
+More engine decisions, all shown in the prompt with their defaults:
+
+- `installDir`: any tool. It is the folder releases are unpacked into, instead of
+  `<data>/tools/<name>/versions`. It must be an absolute path to a new or empty folder, because
+  uninstalling removes it. It is fixed once installed: uninstall to move it.
+- `ports.<name>`: a port the recipe offers with `askOnInstall`.
+- `secrets.<key>`: a secret the recipe offers with `askOnInstall`, e.g. an API key the app
+  already uses. Like passwords, it rides privately in the request and is never echoed back.
+  Left out, Roadie generates it.
+
+A blank value means the default. Any port or secret may be given at install; `askOnInstall`
+only decides what Roadie's own prompt asks. A secret without `generate` is **required**: Roadie
+refuses to install without it and names it in `missing`.
+
+### For apps: offer the options before you install
+
+1. Get the recipe. It is at
+   `https://raw.githubusercontent.com/outcast1000/roadie-recipes/main/recipes/<name>.json`
+   (`index.json` in the same place lists them), or Roadie already has it (`roadie tool status <name>`).
+2. `roadie tool options <name | recipe.json>` (`GET /v1/tools/<name>/options`, or `POST` with
+   `{"recipe": …}`) lists every value an install takes, in one shape:
+   ```jsonc
+   { "key": "ports.web", "label": "Web UI and API port", "kind": "port", "required": false,
+     "secret": false, "default": 5030, "generated": false, "askOnInstall": true, "settable": true }
+   ```
+   `default` is expanded for this computer (`/Users/you/Music/Soulseek`, the real install
+   folder). `otherInstance` is set when another copy of the tool is already running here, found
+   by the recipe's `health` check on the ports the install would use: something answers but
+   rejects Roadie's key. Its `message` says what to do, and `blocksStart` is true for a
+   `singleton`. The install reply, the dry run and the approval prompt carry the same warning.
+   Roadie never stops the other copy. `generated: true` means Roadie makes the value when none is given. Secrets never
+   carry a value; an installed tool's options add `value` (or `set` for a secret). Show them to
+   your user with the defaults filled in.
+3. `roadie tool install <name | recipe.json> --set key=value …` (or `POST
+   /v1/tools/<name>/install` with `{"config": {…}}`) with what the user chose. Leave out
+   anything they kept at the default. Pass `startNow=false` if your app starts the tool itself.
+   Bringing the file you downloaded is fine: identical to the catalog's, it counts as the
+   catalog's.
+4. The user approves once (a dialog, or Roadie's window). While it installs, `tool status` shows
+   `installing: { phase, downloaded, total }`. The desktop request also has `progress`
+   (`GET /v1/requests/<id>`). When it is done, `installed: true`.
+5. `roadie tool start <name>`, then `roadie tool connection <name> --consumer <id>` for the URL
+   and key.
+
 Write `path` defaults with `/` (`{home}/Music/Tool`); on Windows the expanded default gets `\`.
 
 `password` fields must be `secret: true` and go to `{secrets.key}`; everything else is
@@ -127,8 +179,15 @@ Write `path` defaults with `/` (`{home}/Music/Tool`); on Windows the expanded de
 
 ```jsonc
 { "path": "{data}/tool.yml", "format": "yaml" | "json" | "env" | "ini" | "raw", "secret": true,
+  "writeOnce": false,
   "content": { ... JSON tree with placeholders ... } }
 ```
+
+`writeOnce: true` hands the file to the tool after install. Roadie writes it once, when it is
+absent. After that, updates, starts and settings never rewrite it (the tool may edit it, e.g.
+from its web UI), and ports and keys it carries no longer change. When every file is
+`writeOnce`, the tool's settings in Roadie close after install (status `configurable: false`).
+Uninstalling without keeping data removes the file.
 
 `path` must start with `{data}`. The content is a JSON tree; Roadie expands placeholders and
 serializes it in the named format, so quoting is by construction (a password full of `#`, `:`
@@ -141,9 +200,11 @@ string. A string that is exactly one placeholder keeps the value's type (a bool 
 `{{` and `}}` are literal braces.
 
 Write paths with `/` (`"{config.downloadsDir}/.incomplete"`). On Windows, a string that
-expands to an absolute path (`C:\…`, `\\server\…`) has every `/` turned into `\`, so it comes
-out in one separator — tools that insist a path is already normalized (slskd) reject a mixed
-one. A path in the middle of a string (`--dir={data}/x`) is left as written.
+expands to an absolute path (`C:\…`, `\\server\…`) comes out normalized, as .NET's
+`Path.GetFullPath` gives it. Every `/` becomes `\`, doubled and trailing separators go (a drive
+root keeps its own, `D:\`), and `.` and `..` are resolved. So a downloads folder of `D:\` gives
+`D:\.incomplete`, not `D:\\.incomplete`. Tools that insist a path is already normalized (slskd)
+reject any other form. A path in the middle of a string (`--dir={data}/x`) is left as written.
 
 Two directives inside `content`:
 
@@ -210,10 +271,14 @@ Roadie writes the value straight into the file the recipe generates:
 
 ## Authoring loop for assistants
 
-1. `GET /v1/recipes/schema` — this text and the slskd example.
+1. `GET /v1/recipes/schema` — this text and the catalog's slskd as an example.
 2. `GET /v1/recipes/<closest>` — copy and edit.
 3. `POST /v1/recipes/validate` until `ok: true`.
 4. `PUT /v1/recipes/<name>` — saved as a draft; tell the user to review and Trust it in Roadie.
 5. `POST /v1/recipes/<name>/dryrun` — resolves the release for this platform, checks the asset
    URL answers, and renders the files with placeholder values. Nothing is downloaded or written.
 6. `POST /v1/tools/<name>/install` — a request the user approves; poll `GET /v1/requests/<id>`.
+7. `GET /v1/recipes/<name>/submission` — once the user trusted it and it works, the file and a
+   GitHub link for proposing it to the catalog. Open the pull request against
+   `outcast1000/roadie-recipes` with your own GitHub access, or give the user the link. Roadie
+   submits nothing. A change to a catalog recipe must raise `revision` above the catalog's.

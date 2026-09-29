@@ -10,9 +10,12 @@
 //! `{{` and `}}` are literal braces.
 //!
 //! On Windows a result that is an absolute path (`C:\…`, `C:/…`, `\\server`)
-//! has its `/` turned into `\`, so `{config.dir}/.incomplete` comes out in one
-//! separator. Windows itself accepts a mixed path, but tools that check a path
-//! is normalized (slskd: `Path.GetFullPath(p) == p`) reject every file under it.
+//! comes out normalized, as `Path.GetFullPath` would give it: one separator
+//! (`\`), no doubled or trailing separators, `.` and `..` resolved. Windows
+//! itself accepts the rest, but tools that check a path is normalized (slskd:
+//! `Path.GetFullPath(p) == p`) reject every file under one that is not, e.g.
+//! `D:\` + `/.incomplete` = `D:\\.incomplete` for a downloads folder at a
+//! drive's root.
 
 use super::Platform;
 use serde_json::{Map, Value};
@@ -148,10 +151,35 @@ fn is_windows_absolute(s: &str) -> bool {
         || s.starts_with("//")
 }
 
-/// On Windows, an absolute path in one separator. Anything else unchanged.
+/// An absolute Windows path, normalized lexically like `Path.GetFullPath`:
+/// `\` only, empty and `.` segments dropped, `..` resolved (never above the
+/// drive or the `\\server\share` root), no trailing separator except the
+/// drive root's own (`D:\`).
+fn normalize_windows(s: &str) -> String {
+    let s = s.replace('/', "\\");
+    let unc = s.starts_with("\\\\");
+    let (root, rest) = if unc { ("\\\\".to_string(), &s[2..]) } else { (format!("{}\\", &s[..2]), &s[3..]) };
+    // A UNC path's server and share are its root: `..` never climbs past them.
+    let fixed = if unc { 2 } else { 0 };
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in rest.split('\\') {
+        match seg {
+            "" | "." => {}
+            ".." if parts.len() > fixed => {
+                parts.pop();
+            }
+            ".." => {}
+            seg => parts.push(seg),
+        }
+    }
+    format!("{root}{}", parts.join("\\"))
+}
+
+/// On Windows, an absolute path normalized (`normalize_windows`). Anything
+/// else unchanged.
 fn localize(v: Value, ctx: &Ctx) -> Value {
     match v {
-        Value::String(s) if ctx.platform.os == "windows" && is_windows_absolute(&s) => Value::String(s.replace('/', "\\")),
+        Value::String(s) if ctx.platform.os == "windows" && is_windows_absolute(&s) => Value::String(normalize_windows(&s)),
         other => other,
     }
 }
@@ -336,6 +364,23 @@ mod tests {
         assert_eq!(expand("http://127.0.0.1:{ports.web}/api", &c).unwrap(), json!("http://127.0.0.1:5030/api"));
         assert_eq!(expand("--dir={config.dir}/x", &c).unwrap(), json!(r"--dir=C:\Users\a b\Music/x"));
         assert_eq!(expand("{config.dir|json}", &c).unwrap(), json!(serde_json::to_string(r"C:\Users\a b\Music").unwrap()));
+        // Normalized as .NET's Path.GetFullPath would: slskd rejects anything else.
+        for (dir, want) in [
+            (r"D:\", r"D:\.incomplete"),
+            (r"D:/", r"D:\.incomplete"),
+            (r"C:\Users\a b\Music\Soulseek\", r"C:\Users\a b\Music\Soulseek\.incomplete"),
+            (r"C:\Users\\a b\.\Music\x\..\Soulseek", r"C:\Users\a b\Music\Soulseek\.incomplete"),
+            (r"\\nas\music\", r"\\nas\music\.incomplete"),
+        ] {
+            c.config.insert("dir".into(), json!(dir));
+            assert_eq!(expand("{config.dir}/.incomplete", &c).unwrap(), json!(want), "{dir}");
+        }
+        c.config.insert("dir".into(), json!(r"D:\"));
+        assert_eq!(expand("{config.dir}", &c).unwrap(), json!(r"D:\"), "a drive root keeps its separator");
+        c.config.insert("dir".into(), json!(r"C:\a\..\..\b"));
+        assert_eq!(expand("{config.dir}", &c).unwrap(), json!(r"C:\b"), "never above the drive");
+        c.config.insert("dir".into(), json!(r"\\nas\music\..\..\x"));
+        assert_eq!(expand("{config.dir}", &c).unwrap(), json!(r"\\nas\music\x"), "never above the share");
         // On macOS nothing changes.
         let mut mac = ctx();
         mac.config.insert("mixed".into(), json!(r"C:\Users\a b/Music"));

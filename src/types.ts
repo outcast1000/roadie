@@ -2,8 +2,11 @@
 // src-tauri/src/tools/mod.rs (ToolStatus), recipe/mod.rs, requests.rs.
 
 export type Kind = "daemon" | "cli";
-export type Origin = "builtin" | "user" | "draft";
-export type ConnectionPolicy = "none" | "open" | "perConsumerKey";
+/** `builtin` no longer occurs (Roadie ships no recipes); `catalog` is offered by the recipe catalog, not trusted. */
+export type Origin = "builtin" | "user" | "draft" | "catalog";
+/** Where a trusted user recipe came from. */
+export type RecipeSource = "user" | "catalog";
+export type ConnectionPolicy = "none" | "open" | "perConsumerKey" | "sharedKey";
 export type DeferReason = "busy" | "unreachable" | "restartNotAllowed";
 
 export interface ToolRow {
@@ -43,6 +46,12 @@ export interface ToolRow {
   healthDetail: string | null;
   /** Where the installed release is unpacked; null until installed. */
   installDir: string | null;
+  /** An install running now, from any process: phase `resolving`, then `downloading`/`extracting`/`verifying`. */
+  installing: { phase: string; downloaded: number; total: number | null; updatedAt: number } | null;
+  /** Where releases are unpacked (the chosen install folder, or Roadie's default), installed or not. */
+  versionsDir: string;
+  /** False once the tool owns its configuration (written once at install): Roadie's settings no longer apply. */
+  configurable: boolean;
   /** The tool's private data dir (state, secrets, rendered config). */
   dataDir: string;
   logsDir: string;
@@ -50,7 +59,28 @@ export interface ToolRow {
   configFiles: { path: string; secret: boolean }[];
   origin: Origin;
   trusted: boolean;
+  source: RecipeSource;
+  /** The recipe catalog offers this tool. */
+  available: boolean;
+  /** A newer catalog revision of the trusted recipe, waiting for review. */
+  recipeUpdate: { revision: number; changedKeys: string[] } | null;
+  /** A trusted catalog recipe the catalog no longer lists. */
+  delisted: boolean;
   submittedBy: string | null;
+}
+
+/** `GET /v1/recipes/{name}/submission`: proposing a recipe to the catalog. */
+export interface Submission {
+  name: string;
+  repo: string;
+  path: string;
+  file: string;
+  isUpdate: boolean;
+  revision: number;
+  catalogRevision: number | null;
+  submitUrl: string;
+  clipboardFallback: boolean;
+  instructions: string;
 }
 
 export type FieldKind = "text" | "password" | "path" | "paths" | "bool" | "port";
@@ -106,8 +136,10 @@ export interface Recipe {
   layout?: { stripTopDir?: boolean; binaries?: string[] };
   config: ConfigField[];
   configuration?: ConfigEntry[];
-  ports?: Record<string, { default: number; pick?: boolean }>;
-  connection?: { policy: ConnectionPolicy; url: string } | null;
+  ports?: Record<string, { default: number; pick?: boolean; askOnInstall?: boolean; label?: string | null }>;
+  /** No `generate`: required at install. */
+  secrets?: { key: string; generate?: string | null; askOnInstall?: boolean; label?: string | null; minLen?: number | null }[];
+  connection?: { policy: ConnectionPolicy; url: string; key?: string | null } | null;
   createDirs?: string[];
   files?: { path: string; format: string; secret?: boolean; content: unknown }[];
   run?: { args: string[]; env?: Record<string, string>; cwd?: string | null } | null;
@@ -121,6 +153,7 @@ export interface Recipe {
 export interface StoredRecipe {
   recipe: Recipe;
   origin: Origin;
+  source: RecipeSource;
   submittedBy: string | null;
 }
 
@@ -130,7 +163,17 @@ export interface RenderedFile {
   contents: string;
 }
 
+/** Another copy of the tool already running here (`tools::other_instance`). */
+export interface OtherInstance {
+  url: string;
+  /** The recipe is a `singleton`: Roadie's copy will not start while it runs. */
+  blocksStart: boolean;
+  message: string;
+}
+
 export interface DryRun {
+  /** Another copy already running here, which Roadie's would clash with. */
+  otherInstance?: OtherInstance | null;
   platform: string;
   supported: boolean;
   resolved: { version: string; downloadUrl: string; asset: string; checksumsUrl: string | null; floating: boolean } | null;
@@ -164,6 +207,8 @@ export interface RoadieRequest {
   /** Install / replaceRecipe: the recipe the app brought, reviewed and trusted by approving. */
   recipe?: Recipe;
   recipeChange?: RecipeChange;
+  /** `catalog` when `recipe` is the recipe catalog's (a first install or a recipe update). */
+  recipeSource?: RecipeSource;
   returnUrl?: string;
   requestedBy: string;
   status: RequestStatus;

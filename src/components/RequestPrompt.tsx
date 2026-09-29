@@ -3,7 +3,7 @@ import type { ConfigField, DryRun, Recipe, RoadieRequest, StoredRecipe, ToolRow 
 import { InstallProgressBar } from "./ToolRow";
 import { ConfigForm } from "./ConfigForm";
 import { InstallPlan } from "./InstallPlan";
-import { installFields, isSettled, recipeChangeText, withRequestDecisions } from "../install";
+import { installFields, isSettled, recipeOriginText, withRequestDecisions } from "../install";
 
 interface Props {
   request: RoadieRequest;
@@ -65,7 +65,7 @@ export function RequestPrompt({ request: r, tool, fields, recipe, dryRun, dryRun
   const planRecipe = brought ?? recipe?.recipe;
   const planning = r.kind === "install" && !r.progress && !!planRecipe && (!!tool || !!brought);
   const formTool = tool ?? ({ name: r.tool, config: {} } as unknown as ToolRow);
-  const decisions = planning ? installFields(brought?.config ?? fields, planRecipe) : [];
+  const decisions = planning ? installFields(brought?.config ?? fields, planRecipe, tool?.versionsDir) : [];
   const decidedByClient = decisions.filter((f) => isSettled(f, undefined, r));
   const open = decisions.filter((f) => !isSettled(f, tool, r));
 
@@ -76,7 +76,7 @@ export function RequestPrompt({ request: r, tool, fields, recipe, dryRun, dryRun
         {detail ? <p>{detail}</p> : null}
         {brought && r.recipeChange ? (
           <p className="warn-text">
-            {r.requestedBy} brings {recipeChangeText(r.recipeChange)}, by {brought.author || "an unnamed author"} (revision {brought.revision}). Approving trusts it.{" "}
+            {recipeOriginText(r.requestedBy, r.recipeChange, r.recipeSource)}, by {brought.author || "an unnamed author"} (revision {brought.revision}). Approving trusts it.{" "}
             <button className="link" onClick={() => onReviewBrought(r)}>
               {broughtReviewed ? "Review it again" : "Review it"}
             </button>

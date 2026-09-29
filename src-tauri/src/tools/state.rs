@@ -20,6 +20,9 @@ pub struct ToolState {
     /// sha256 of the archive we installed — integrity of *our* copy.
     pub archive_sha256: Option<String>,
     pub ports: BTreeMap<String, u16>,
+    /// Ports the app or the user chose at install: never moved.
+    #[serde(default)]
+    pub chosen_ports: std::collections::BTreeSet<String>,
     /// Generated secrets plus secret config fields, by key.
     pub secrets: BTreeMap<String, String>,
     /// Non-secret config values, by key.
@@ -68,8 +71,13 @@ fn fill(recipe: &Recipe, s: &mut ToolState, data_dir: &Path, platform: &recipe::
         dirty = true;
     }
     for sec in &recipe.secrets {
-        let n: usize = sec.generate.trim_start_matches("hex").parse().unwrap_or(48);
-        if s.secrets.get(&sec.key).map(|v| v.len()) != Some(n) {
+        // Any value given at install only has to be long enough; a secret
+        // Roadie generates is minted once. One without `generate` stays
+        // missing until an install supplies it.
+        if s.secrets.get(&sec.key).is_some_and(|v| v.len() >= sec.min_len().min(sec.generated_len().unwrap_or(usize::MAX))) {
+            continue;
+        }
+        if let Some(n) = sec.generated_len() {
             s.secrets.insert(sec.key.clone(), paths::random_hex(n / 2)?);
             dirty = true;
         }
@@ -227,7 +235,7 @@ mod tests {
     use crate::recipe::Platform;
 
     fn slskd() -> Recipe {
-        recipe::load_builtin().remove(0)
+        recipe::fixtures::recipe("slskd")
     }
 
     #[test]
