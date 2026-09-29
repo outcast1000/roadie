@@ -106,10 +106,10 @@ that app its connection key, so it can read `/v1/tools/<name>/connection?consume
 the request is `done`. Only for tools with a `connection`; the consumer must already be registered.
 
 A `connection.webLogin` is the sign-in for the tool's own web page when the recipe put one
-behind generated credentials (slskd's web UI: `{ "username": "roadie", "password":
-"{secrets.webPassword}" }`). It is expanded like `url` and returned as `webLogin` alongside the
-key in `/v1/tools/<name>/connection` — to an approved consumer and to the owner — so a person can
-open the page. It is never part of a tool's status. Both fields must be non-empty.
+behind a login — a literal (slskd's web UI keeps slskd's own default: `{ "username": "slskd",
+"password": "slskd" }`) or a generated secret (`"{secrets.webPassword}"`). It is expanded like
+`url` and returned as `webLogin` alongside the key in `/v1/tools/<name>/connection` — to an
+approved consumer and to the owner — so a person can open the page. It is never part of a tool's status. Both fields must be non-empty.
 
 Two decisions belong to the engine rather than to a config field, and use reserved keys in the
 same `config` object: `startNow` (start the daemon as soon as it is installed) and `autostart`

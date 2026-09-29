@@ -1226,7 +1226,6 @@ mod tests {
         ctx.config.insert("shareDownloads".into(), Value::Bool(true));
         ctx.config.insert("soulseekUsername".into(), Value::String("björk".into()));
         ctx.secrets.insert("internalKey".into(), "i".repeat(48));
-        ctx.secrets.insert("webPassword".into(), "web-pass".into());
         ctx.secrets.insert("soulseekPassword".into(), "p#a:s\"s\\w'ord ü".into());
         ctx.connection_url = Some("http://127.0.0.1:5031".into());
         ctx.consumers = vec![template::Consumer { id: "viboplr".into(), key: "k".repeat(48) }];
@@ -1238,6 +1237,7 @@ mod tests {
         assert!(y.contains("  port: 5031\n"), "{y}");
         assert!(y.contains("  ip_address: \"127.0.0.1\"\n"));
         assert!(y.contains(&format!("      roadie:\n        key: \"{}\"\n", "i".repeat(48))), "{y}");
+        assert!(y.contains("    username: \"slskd\"\n    password: \"slskd\"\n"), "slskd's default web login: {y}");
         assert!(y.contains(&format!("      viboplr:\n        key: \"{}\"\n", "k".repeat(48))));
         assert!(y.contains(r#"  downloads: "C:\\Users\\x\\Music\\Soulseek""#));
         assert!(y.contains("  directories:\n    - \"C:\\\\Users"));

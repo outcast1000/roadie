@@ -260,7 +260,6 @@ mod tests {
         let r = slskd();
         let a = load_or_init(&r, &dir, &Platform::current()).unwrap();
         assert_eq!(a.secrets["internalKey"].len(), 48);
-        assert_eq!(a.secrets["webPassword"].len(), 32);
         assert_eq!(a.ports["web"], 5030);
         assert_eq!(a.config["shareDownloads"], Value::Bool(true));
         assert!(a.config["downloadsDir"].as_str().unwrap().ends_with("Soulseek"));

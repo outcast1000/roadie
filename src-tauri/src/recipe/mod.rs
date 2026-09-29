@@ -1204,8 +1204,8 @@ mod tests {
         assert!(!r.supported_on(&Platform { os: "freebsd", arch: "arm64" }));
         assert_eq!(r.ports["web"].default, 5030);
         assert!(r.connection.as_ref().unwrap().policy == ConnectionPolicy::PerConsumerKey);
-        let login = r.connection.as_ref().unwrap().web_login.as_ref().expect("slskd's web UI sits behind a generated login");
-        assert_eq!(login.password, "{secrets.webPassword}");
+        let login = r.connection.as_ref().unwrap().web_login.as_ref().expect("slskd's web UI sits behind a login");
+        assert_eq!((login.username.as_str(), login.password.as_str()), ("slskd", "slskd"), "slskd's own default");
     }
 
     #[test]

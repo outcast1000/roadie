@@ -3,11 +3,11 @@
   "name": "slskd",
   "displayName": "slskd",
   "author": "Roadie",
-  "revision": 4,
+  "revision": 5,
   "summary": "Soulseek client with a web UI and HTTP API. Music apps use it to search and download from the Soulseek network.",
   "homepage": "https://github.com/slskd/slskd",
   "license": "AGPL-3.0",
-  "notes": "slskd is a machine-wide singleton: a copy you run yourself blocks this one. The web UI stays on, bound to 127.0.0.1, behind generated credentials — that is what gives every OS a graceful stop.",
+  "notes": "slskd is a machine-wide singleton: a copy you run yourself blocks this one. The web UI stays on, bound to 127.0.0.1, behind slskd's default login (slskd / slskd) — that is what gives every OS a graceful stop.",
   "kind": "daemon",
 
   "platforms": ["darwin-arm64", "darwin-x64", "windows-x64", "windows-arm64"],
@@ -31,8 +31,7 @@
   "version": { "args": ["--version"], "regex": "(\\d+\\.\\d+\\.\\d+)", "timeoutSec": 60 },
 
   "secrets": [
-    { "key": "internalKey", "generate": "hex48" },
-    { "key": "webPassword", "generate": "hex32" }
+    { "key": "internalKey", "generate": "hex48" }
   ],
   "ports": {
     "web": { "default": 5030, "pick": true },
@@ -57,7 +56,7 @@
     "minLen": 16,
     "maxLen": 255,
     "url": "http://127.0.0.1:{ports.web}",
-    "webLogin": { "username": "roadie", "password": "{secrets.webPassword}" }
+    "webLogin": { "username": "slskd", "password": "slskd" }
   },
 
   "createDirs": ["{config.downloadsDir}/.incomplete", "{data}/app", "{data}/extract"],
@@ -84,8 +83,8 @@
           "https": { "disabled": true },
           "authentication": {
             "disabled": false,
-            "username": "roadie",
-            "password": "{secrets.webPassword}",
+            "username": "slskd",
+            "password": "slskd",
             "api_keys": {
               "roadie": { "key": "{secrets.internalKey}", "role": "readwrite", "cidr": "127.0.0.1/32,::1/128" },
               "$each": "consumers",
@@ -136,7 +135,7 @@
     "graceSec": 15,
     "api": [
       { "method": "POST", "url": "{connection.url}/api/v0/session",
-        "json": { "username": "roadie", "password": "{secrets.webPassword}" },
+        "json": { "username": "slskd", "password": "slskd" },
         "capture": { "token": "$.token" } },
       { "method": "DELETE", "url": "{connection.url}/api/v0/application",
         "headers": { "Authorization": "Bearer {token}" } }
