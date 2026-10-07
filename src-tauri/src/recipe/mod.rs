@@ -322,8 +322,8 @@ impl SecretDef {
 #[serde(rename_all = "camelCase")]
 pub struct PortDef {
     pub default: u16,
-    /// Scan `default+1..=default+10` when the default is taken by something
-    /// that is not this tool. `false` for ports the engine never probes. A
+    /// Move to `default`, then the first free port in `default+1..=default+100`,
+    /// when the port is taken by something that is not this tool. `false` for ports the engine never probes. A
     /// port the app or the user chose is never moved.
     #[serde(default = "default_true")]
     pub pick: bool,

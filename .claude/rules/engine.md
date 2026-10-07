@@ -76,8 +76,10 @@ there first.
   version flag and the regex capture must prefix-match the resolved version (`floating:` tags
   skip the compare). No checksum upstream → size floor + HTML sniff + this run is the whole
   defence; say so in the review UI, not in code comments only.
-- **Ports.** `choose_ports` keeps a port that is free or already answers as ours/foreign; scans
-  `default+1..=+10` otherwise. A foreign instance on the port is *reported*
+- **Ports.** `choose_ports` keeps a port that is free or already answers as ours/foreign; otherwise
+  tries the recipe's `default` (a kept port may predate a recipe that changed it), then scans
+  `default+1..=+100` (`PORT_SCAN`: wide enough to clear a 100-port block Windows reserves for
+  Hyper-V / WSL / Docker, which no process holds but nothing may bind). A foreign instance on the port is *reported*
   (`foreignInstanceOnPort`), never fought.
 - **Start failure classification** is the recipe's `startFailures` regexes over the last 40 log
   lines; the fallback is `startFailed` with the tail as detail. `last_errors` persists the

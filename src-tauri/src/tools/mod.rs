@@ -596,17 +596,35 @@ fn choose_ports(recipe: &Recipe, st: &mut ToolState, p: &ToolPaths) -> Result<()
             _ => {
                 // Never a port another of this tool's ports already has.
                 let taken: Vec<u16> = st.ports.iter().filter(|(n, _)| *n != name).map(|(_, p)| *p).collect();
-                let picked = (def.default + 1..=def.default + 10).find(|q| !taken.contains(q) && std::net::TcpListener::bind(("127.0.0.1", *q)).is_ok());
+                let picked = port_candidates(port, def.default).find(|q| !taken.contains(q) && std::net::TcpListener::bind(("127.0.0.1", *q)).is_ok());
                 match picked {
                     Some(q) => {
                         st.ports.insert(name.clone(), q);
                     }
-                    None => return Err(format!("no free port between {} and {}", def.default, def.default + 10)),
+                    None => {
+                        let last = def.default.saturating_add(PORT_SCAN);
+                        return Err(format!(
+                            "no free port for `{name}`: {port} and {}–{last} are in use or reserved by the system (on Windows, `netsh interface ipv4 show excludedportrange protocol=tcp` lists reserved ranges)",
+                            def.default
+                        ));
+                    }
                 }
             }
         }
     }
     Ok(())
+}
+
+/// How far past its default a picked port may move. Wide enough to clear a
+/// block Windows reserves for Hyper-V / WSL / Docker (100 ports at a time).
+const PORT_SCAN: u16 = 100;
+
+/// Where a taken port may go: the recipe's default first (the kept port may
+/// predate a recipe that changed it), then the ports after it.
+fn port_candidates(current: u16, default: u16) -> impl Iterator<Item = u16> {
+    std::iter::once(default)
+        .chain((1..=PORT_SCAN).filter_map(move |i| default.checked_add(i)))
+        .filter(move |q| *q != current)
 }
 
 // --- Cli shims ---
@@ -1692,6 +1710,39 @@ mod tests {
             }
         });
         port
+    }
+
+    #[test]
+    fn a_taken_port_tries_the_default_then_scans_past_it() {
+        let c: Vec<u16> = port_candidates(50300, 2234).collect();
+        assert_eq!(&c[..3], &[2234, 2235, 2236], "the default first: a kept port may predate it");
+        assert_eq!(c.len(), 1 + PORT_SCAN as usize);
+        assert_eq!(c.last(), Some(&(2234 + PORT_SCAN)));
+        // The port that just failed is not tried again.
+        assert!(!port_candidates(2234, 2234).any(|q| q == 2234));
+        // No overflow at the top of the range.
+        assert_eq!(port_candidates(1, 65535).collect::<Vec<_>>(), vec![65535]);
+    }
+
+    #[test]
+    fn a_kept_port_the_system_refuses_moves_to_the_recipes_default() {
+        crate::recipe::store::test_root();
+        let free = || std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        let mut r = r6("pick-port-test");
+        for name in ["web", "https"] {
+            r.ports.get_mut(name).unwrap().default = free();
+        }
+        let listen = r.ports.get_mut("listen").unwrap();
+        listen.pick = true;
+        listen.default = free();
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let old = held.local_addr().unwrap().port();
+        let p = paths::tool_paths(&r.name).unwrap();
+        let mut st = ToolState::default();
+        st.ports.insert("listen".into(), old);
+
+        choose_ports(&r, &mut st, &p).unwrap();
+        assert_eq!(st.ports["listen"], r.ports["listen"].default, "{:?}", st.ports);
     }
 
     #[test]
