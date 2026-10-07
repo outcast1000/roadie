@@ -39,8 +39,9 @@ const files = {
     write: (t, v) => t.replace(/(\[package\][^[]*?\nversion = ")[^"]+(")/, `$1${v}$2`),
   },
   "src-tauri/Cargo.lock": {
-    read: (t) => t.match(/\nname = "roadie"\nversion = "([^"]+)"/)?.[1],
-    write: (t, v) => t.replace(/(\nname = "roadie"\nversion = ")[^"]+(")/, `$1${v}$2`),
+    // `\r?`: a Windows checkout has CRLF line endings.
+    read: (t) => t.match(/\nname = "roadie"\r?\nversion = "([^"]+)"/)?.[1],
+    write: (t, v) => t.replace(/(\nname = "roadie"\r?\nversion = ")[^"]+(")/, `$1${v}$2`),
   },
 };
 
