@@ -171,7 +171,7 @@ pub fn parse(args: &[String]) -> Option<Mode> {
         Some(Mode::Serve { data_dir: dir })
     } else if start_tool {
         Some(Mode::LegacyStartTool { data_dir: dir })
-    } else if matches!(command, Some("tool" | "request" | "service" | "recipe" | "maintain" | "version" | "--version" | "help" | "--help" | "-h")) {
+    } else if matches!(command, Some("tool" | "request" | "service" | "recipe" | "catalog" | "maintain" | "version" | "--version" | "help" | "--help" | "-h")) {
         Some(Mode::Client { data_dir: dir, argv: rest })
     } else {
         None
@@ -345,6 +345,20 @@ mod tests {
         assert_eq!(parse(&unrelated), None);
         assert_eq!(maybe_run(&unrelated), None);
         assert_eq!(parse(&["roadie".into()]), None, "no arguments is the window");
+    }
+
+    #[test]
+    fn every_command_the_usage_names_reaches_the_client() {
+        // `catalog` was listed and dispatched but not parsed, so it printed
+        // the usage instead of running.
+        for usage in [const_format_usage::DESKTOP, const_format_usage::CLI] {
+            // The first word after `roadie ` on each usage line.
+            let words = usage.lines().filter_map(|l| l.trim_start().strip_prefix("roadie ")?.split_whitespace().next());
+            for w in words.filter(|w| *w != "--serve") {
+                let argv = vec!["roadie".to_string(), "--data-dir".into(), "/d".into(), w.to_string()];
+                assert!(matches!(parse(&argv), Some(Mode::Client { .. })), "`roadie {w}` does not parse as a command");
+            }
+        }
     }
 
     #[test]
